@@ -578,36 +578,38 @@ elif page == "🎯 Predict":
     X_m_med = X_raw[y_raw == 1][ORIG_FEATURES].median()
     X_med   = X_raw[ORIG_FEATURES].median()
 
-    # session_state: fill_mode kalici, inputlar anlik guncellenir
-    if "fill_mode" not in st.session_state:
-        st.session_state.fill_mode = "overall"
-
-    # Medyan sozlukleri
     medians = {
         "benign":    X_b_med,
         "malignant": X_m_med,
         "overall":   X_med,
     }
 
-    def apply_fill(mode):
-        st.session_state.fill_mode = mode
+    # fill_mode session_state'te yoksa varsayilan
+    if "fill_mode" not in st.session_state:
+        st.session_state.fill_mode = "overall"
+
+    # number_input key'leri fill_mode'a gore ilklendir
+    # (sadece key yoksa — kullanici manuel girdiyse dokunma)
+    if st.session_state.get("_last_fill") != st.session_state.fill_mode:
         for f in ORIG_FEATURES:
-            st.session_state[f"inp_{f}"] = float(medians[mode][f])
+            st.session_state[f"inp_{f}"] = float(medians[st.session_state.fill_mode][f])
+        st.session_state["_last_fill"] = st.session_state.fill_mode
 
     # Quick fill butonlari
     st.markdown("**Quick fill:**")
     qc1, qc2, qc3 = st.columns(3)
     if qc1.button("Fill Benign median",      use_container_width=True):
-        apply_fill("benign")
+        st.session_state.fill_mode = "benign"
+        st.session_state["_last_fill"] = None   # tetikle
+        st.rerun()
     if qc2.button("Fill Malignant median",   use_container_width=True):
-        apply_fill("malignant")
+        st.session_state.fill_mode = "malignant"
+        st.session_state["_last_fill"] = None
+        st.rerun()
     if qc3.button("Reset to overall median", use_container_width=True):
-        apply_fill("overall")
-
-    # Session_state'te yoksa aktif moda gore default deger ata
-    for f in ORIG_FEATURES:
-        if f"inp_{f}" not in st.session_state:
-            st.session_state[f"inp_{f}"] = float(medians[st.session_state.fill_mode][f])
+        st.session_state.fill_mode = "overall"
+        st.session_state["_last_fill"] = None
+        st.rerun()
 
     # Feature gruplari
     mean_feats  = [c for c in ORIG_FEATURES if c.endswith("_mean")]
