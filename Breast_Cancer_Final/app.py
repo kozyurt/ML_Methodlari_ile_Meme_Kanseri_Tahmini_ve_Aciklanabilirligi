@@ -735,9 +735,9 @@ with tab3:
     st.markdown("<div class='sec-header'>🖼️ Analiz Görselleri</div>", unsafe_allow_html=True)
     img_pairs = [
         ("graphs/final_model_confusion_matrix.png", "Confusion Matrix & ROC"),
-        ("graphs/model_comparison_eng.png",          "Model Karşılaştırması"),
-        ("graphs/shap_importance_eng.png",            "SHAP Özellik Önemi"),
-        ("graphs/shap_summary_eng.png",               "SHAP Özet Analizi"),
+        ("graphs/model_comparison.png",          "Model Karşılaştırması"),
+        ("graphs/shap_importance.png",            "SHAP Özellik Önemi"),
+        ("graphs/shap_summary.png",               "SHAP Özet Analizi"),
     ]
     row1 = st.columns(2)
     for i, (path, caption) in enumerate(img_pairs):
@@ -777,10 +777,10 @@ with tab4:
 
     with col_i:
         eda_imgs = [
-            ("graphs/correlation_matrix_eng.png",        "Korelasyon Matrisi"),
-            ("graphs/target_correlation_eng.png",         "Hedef Korelasyon"),
-            ("graphs/top10_outliers_boxplot_eng.png",     "Aykırı Değerler"),
-            ("graphs/diagnosis_distribution_eng.png",     "Dağılım"),
+            ("graphs/correlation_matrix.png",        "Korelasyon Matrisi"),
+            ("graphs/target_correlation.png",         "Hedef Korelasyon"),
+            ("graphs/top10_outliers_boxplot.png",     "Aykırı Değerler"),
+            ("graphs/diagnosis_distribution.png",     "Dağılım"),
         ]
         sel = st.radio("Görsel Seç", [c for _, c in eda_imgs],
                        horizontal=True, label_visibility="collapsed")
