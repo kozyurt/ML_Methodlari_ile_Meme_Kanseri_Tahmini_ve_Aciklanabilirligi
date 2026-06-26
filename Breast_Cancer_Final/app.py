@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import pickle
 import warnings
-from sklearn.datasets import load_breast_cancer
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.pipeline import Pipeline
-from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, roc_curve, confusion_matrix
@@ -73,8 +73,13 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
+PLOT_LAYOUT = dict(
+    paper_bgcolor=C['bg'], plot_bgcolor=C['card'],
+    font_color=C['text'], margin=dict(t=50, b=40, l=40, r=20)
+)
+
 # ══════════════════════════════════════════════════════════════════════════════
-# FEATURE ENGINEERING (matches notebook exactly)
+# FEATURE ENGINEERING — must match notebook exactly
 # ══════════════════════════════════════════════════════════════════════════════
 class FeatureEngineeringTransformer(BaseEstimator, TransformerMixin):
     def __init__(self):
@@ -98,32 +103,34 @@ class FeatureEngineeringTransformer(BaseEstimator, TransformerMixin):
         return X
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DATA & MODEL LOADING
+# LOAD SAVED PIPELINE  (breast_cancer_pipeline.pkl)
+# ══════════════════════════════════════════════════════════════════════════════
+@st.cache_resource(show_spinner="Loading saved pipeline…")
+def load_saved_pipeline():
+    with open("breast_cancer_pipeline.pkl", "rb") as f:
+        pipeline = pickle.load(f)
+    return pipeline
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DATA LOADING
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner="Loading dataset…")
 def load_data():
-    # Try local file first, fall back to sklearn built-in
-    try:
-        df = pd.read_csv("data.csv")
-        df = df.drop(columns=[c for c in ['id', 'Unnamed: 32'] if c in df.columns])
-        encoder = LabelEncoder()
-        df['diagnosis'] = encoder.fit_transform(df['diagnosis'])
-        X = df.drop('diagnosis', axis=1)
-        y = df['diagnosis']
-    except FileNotFoundError:
-        data = load_breast_cancer()
-        X = pd.DataFrame(data.data, columns=data.feature_names)
-        # Rename to match notebook feature names
-        rename = {n: n.replace(' ', '_') for n in X.columns}
-        # Keep original names for compatibility
-        y = pd.Series(data.target)
+    df = pd.read_csv("data.csv")
+    df = df.drop(columns=[c for c in ['id', 'Unnamed: 32'] if c in df.columns])
+    encoder = LabelEncoder()
+    df['diagnosis'] = encoder.fit_transform(df['diagnosis'])   # B=0, M=1
+    X = df.drop('diagnosis', axis=1)
+    y = df['diagnosis']
     return X, y
 
-@st.cache_resource(show_spinner="Training models…")
-def train_models():
-    X, y = load_data()
+# ══════════════════════════════════════════════════════════════════════════════
+# COMPARISON MODELS  (trained fresh for the comparison page only)
+# ══════════════════════════════════════════════════════════════════════════════
+@st.cache_resource(show_spinner="Training comparison models…")
+def train_comparison_models(X_raw, y_raw):
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X_raw, y_raw, test_size=0.2, random_state=42, stratify=y_raw
     )
 
     preprocessing = Pipeline([
@@ -133,19 +140,19 @@ def train_models():
     X_train_s = preprocessing.fit_transform(X_train)
     X_test_s  = preprocessing.transform(X_test)
 
-    fe = FeatureEngineeringTransformer().fit_transform(X_train)
-    feature_names = fe.columns.tolist()
+    fe_tmp = FeatureEngineeringTransformer().fit_transform(X_train)
+    feature_names = fe_tmp.columns.tolist()
     X_train_s = pd.DataFrame(X_train_s, columns=feature_names)
     X_test_s  = pd.DataFrame(X_test_s,  columns=feature_names)
 
     models = {
-        'Logistic Regression':  LogisticRegression(random_state=42, max_iter=10000, C=0.1, solver='lbfgs'),
-        'Random Forest':        RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1),
-        'Gradient Boosting':    GradientBoostingClassifier(n_estimators=200, random_state=42),
-        'SVM':                  SVC(kernel='rbf', probability=True, random_state=42),
-        'KNN':                  KNeighborsClassifier(n_neighbors=5),
-        'Naive Bayes':          GaussianNB(),
-        'Decision Tree':        DecisionTreeClassifier(random_state=42, max_depth=10),
+        'Logistic Regression': LogisticRegression(random_state=42, max_iter=10000, C=0.1, solver='lbfgs'),
+        'Random Forest':       RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1),
+        'Gradient Boosting':   GradientBoostingClassifier(n_estimators=200, random_state=42),
+        'SVM':                 SVC(kernel='rbf', probability=True, random_state=42),
+        'KNN':                 KNeighborsClassifier(n_neighbors=5),
+        'Naive Bayes':         GaussianNB(),
+        'Decision Tree':       DecisionTreeClassifier(random_state=42, max_depth=10),
     }
 
     results = {}
@@ -167,32 +174,62 @@ def train_models():
             'y_proba':   y_proba,
         }
 
-    best_name = max(results, key=lambda k: results[k]['F1-Score'])
-
-    # Build final pipeline
-    final_pipeline = Pipeline([
-        ('feature_engineering', FeatureEngineeringTransformer()),
-        ('scaler', StandardScaler()),
-        ('model', results[best_name]['model'])
-    ])
-    final_pipeline.fit(X_train, y_train)
-
-    # Feature importance (RF)
+    # Feature importance via RF
     rf_imp = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
     rf_imp.fit(X_train_s, y_train)
     imp_df = pd.DataFrame({'feature': feature_names, 'importance': rf_imp.feature_importances_})\
                .sort_values('importance', ascending=False)
 
-    return (results, best_name, X_test, y_test, X_train,
-            preprocessing, final_pipeline, imp_df, feature_names, X, y)
+    return results, X_test, y_test, X_train, imp_df, feature_names
 
-# ── Load ───────────────────────────────────────────────────────────────────────
-X_raw, y_raw = load_data()
-(results, best_name, X_test, y_test, X_train,
- preprocessing, final_pipeline, imp_df, feature_names, X_all, y_all) = train_models()
+# ══════════════════════════════════════════════════════════════════════════════
+# BOOTSTRAP
+# ══════════════════════════════════════════════════════════════════════════════
+try:
+    final_pipeline = load_saved_pipeline()
+    PIPELINE_LOADED = True
+except FileNotFoundError:
+    PIPELINE_LOADED = False
+    st.sidebar.warning("⚠️ `breast_cancer_pipeline.pkl` not found. Prediction page unavailable.")
 
-ORIG_FEATURES = X_raw.columns.tolist()
-best = results[best_name]
+try:
+    X_raw, y_raw = load_data()
+    DATA_LOADED = True
+except FileNotFoundError:
+    DATA_LOADED = False
+    st.error("⚠️ `data.csv` not found. Place it in the same folder as `app.py`.")
+    st.stop()
+
+# Feature names come from the pkl pipeline (guaranteed to match)
+if PIPELINE_LOADED:
+    ORIG_FEATURES = final_pipeline.named_steps['feature_engineering'].feature_names_
+else:
+    ORIG_FEATURES = X_raw.columns.tolist()
+
+# Best model is always Logistic Regression (from saved pipeline)
+BEST_MODEL_NAME = "Logistic Regression"
+
+results, X_test, y_test, X_train, imp_df, feature_names = train_comparison_models(X_raw, y_raw)
+
+# ── Evaluate saved pipeline on test set for accurate KPIs ─────────────────────
+if PIPELINE_LOADED:
+    X_train_split, X_test_split, y_train_split, y_test_split = train_test_split(
+        X_raw, y_raw, test_size=0.2, random_state=42, stratify=y_raw
+    )
+    y_pred_saved  = final_pipeline.predict(X_test_split)
+    y_proba_saved = final_pipeline.predict_proba(X_test_split)[:, 1]
+    SAVED_METRICS = {
+        'Accuracy':  accuracy_score(y_test_split, y_pred_saved),
+        'Precision': precision_score(y_test_split, y_pred_saved, zero_division=0),
+        'Recall':    recall_score(y_test_split, y_pred_saved, zero_division=0),
+        'F1-Score':  f1_score(y_test_split, y_pred_saved, zero_division=0),
+        'ROC-AUC':   roc_auc_score(y_test_split, y_proba_saved),
+        'y_pred':    y_pred_saved,
+        'y_proba':   y_proba_saved,
+    }
+else:
+    SAVED_METRICS = results.get(BEST_MODEL_NAME, list(results.values())[0])
+    y_test_split  = y_test
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
@@ -206,16 +243,15 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     st.divider()
-    st.caption(f"Best model: **{best_name}**  \nAccuracy: **{best['Accuracy']:.4f}**  \nAUC: **{best['ROC-AUC']:.4f}**")
+    st.caption(
+        f"Best model: **{BEST_MODEL_NAME}**  \n"
+        f"Accuracy: **{SAVED_METRICS['Accuracy']:.4f}**  \n"
+        f"AUC: **{SAVED_METRICS['ROC-AUC']:.4f}**"
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# HELPERS
+# HELPER
 # ══════════════════════════════════════════════════════════════════════════════
-PLOT_LAYOUT = dict(
-    paper_bgcolor=C['bg'], plot_bgcolor=C['card'],
-    font_color=C['text'], margin=dict(t=50, b=40, l=40, r=20)
-)
-
 def kpi(col, value, label, color=None):
     color = color or C['primary']
     col.markdown(f"""
@@ -232,20 +268,19 @@ if page == "📊 Overview":
     st.markdown("Binary classification of tumor cells as **Benign** or **Malignant** using Wisconsin Diagnostic Breast Cancer data.")
     st.divider()
 
-    c1,c2,c3,c4,c5 = st.columns(5)
-    kpi(c1, len(X_all), "Total Samples", C['primary'])
-    kpi(c2, f"{(y_all==0).sum()}", "Benign (0)", C['benign'])
-    kpi(c3, f"{(y_all==1).sum()}", "Malignant (1)", C['malignant'])
-    kpi(c4, f"{best['Accuracy']:.4f}", f"Best Accuracy\n({best_name})", C['primary'])
-    kpi(c5, f"{best['ROC-AUC']:.4f}", "Best ROC-AUC", C['primary'])
+    c1, c2, c3, c4, c5 = st.columns(5)
+    kpi(c1, len(X_raw),           "Total Samples",                  C['primary'])
+    kpi(c2, int((y_raw==0).sum()), "Benign (0)",                    C['benign'])
+    kpi(c3, int((y_raw==1).sum()), "Malignant (1)",                 C['malignant'])
+    kpi(c4, f"{SAVED_METRICS['Accuracy']:.4f}", f"Accuracy\n({BEST_MODEL_NAME})", C['primary'])
+    kpi(c5, f"{SAVED_METRICS['ROC-AUC']:.4f}",  "ROC-AUC",         C['primary'])
 
     st.divider()
-
     col_a, col_b = st.columns(2)
+    counts = y_raw.value_counts().sort_index()
 
     with col_a:
         st.markdown('<div class="sec-title">Target Distribution</div>', unsafe_allow_html=True)
-        counts = y_all.value_counts().sort_index()
         fig = go.Figure(go.Bar(
             x=['Benign (0)', 'Malignant (1)'],
             y=[counts[0], counts[1]],
@@ -284,7 +319,6 @@ elif page == "🔍 EDA":
 
     tab1, tab2, tab3, tab4 = st.tabs(["Feature Importance", "Outlier Analysis", "Correlation Heatmap", "Feature Distributions"])
 
-    # ── Tab 1: Feature Importance ──────────────────────────────────────────────
     with tab1:
         st.markdown('<div class="sec-title">Feature Importance (Random Forest + Feature Engineering)</div>', unsafe_allow_html=True)
         top_n = st.slider("Show top N features", 10, len(imp_df), 20, key="imp_n")
@@ -296,40 +330,34 @@ elif page == "🔍 EDA":
             text=[f"{v:.4f}" for v in df_imp['importance']], textposition='outside',
         ))
         fig.update_layout(height=max(400, top_n*22), xaxis_title="Importance Score",
-                          title="Feature Importance — engineered features highlighted in red", **PLOT_LAYOUT)
+                          title="Feature Importance — top 3 in red", **PLOT_LAYOUT)
         st.plotly_chart(fig, use_container_width=True)
-        st.caption("🔴 **Red bars** = top 3 features. Note: `concavity_points_product` (engineered) ranks very high.")
+        st.caption("🔴 **Red bars** = top 3. Note: `concavity_points_product` (engineered) ranks very high.")
 
-    # ── Tab 2: Outlier Boxplot ─────────────────────────────────────────────────
     with tab2:
-        st.markdown('<div class="sec-title">Top 10 Features with Most Outliers (IQR Method)</div>', unsafe_allow_html=True)
-
-        def count_iqr_outliers(series):
-            Q1, Q3 = series.quantile(0.25), series.quantile(0.75)
+        st.markdown('<div class="sec-title">Top 10 Features with Most Outliers (IQR)</div>', unsafe_allow_html=True)
+        def count_iqr(s):
+            Q1, Q3 = s.quantile(0.25), s.quantile(0.75)
             IQR = Q3 - Q1
-            return ((series < Q1 - 1.5*IQR) | (series > Q3 + 1.5*IQR)).sum()
-
-        outlier_counts = {col: count_iqr_outliers(X_raw[col]) for col in X_raw.columns}
-        top10_outlier = sorted(outlier_counts, key=outlier_counts.get, reverse=True)[:10]
-
+            return ((s < Q1-1.5*IQR) | (s > Q3+1.5*IQR)).sum()
+        outlier_counts = {col: count_iqr(X_raw[col]) for col in X_raw.columns}
+        top10 = sorted(outlier_counts, key=outlier_counts.get, reverse=True)[:10]
         fig = go.Figure()
-        for col in top10_outlier:
+        for col in top10:
             fig.add_trace(go.Box(y=X_raw[col], name=col, boxpoints='outliers',
                                  marker_color=C['primary'], line_color=C['primary']))
         fig.update_layout(height=480, title="Boxplot — Top 10 Features by Outlier Count",
                           showlegend=False, **PLOT_LAYOUT)
         st.plotly_chart(fig, use_container_width=True)
-        st.info("ℹ️ These outliers are **not errors** — extreme values in medical data often represent genuine biological variance in malignant cases.")
+        st.info("ℹ️ These outliers are **not errors** — extreme values in medical data represent genuine biological variance in malignant cases.")
 
-    # ── Tab 3: Correlation Heatmap ─────────────────────────────────────────────
     with tab3:
         st.markdown('<div class="sec-title">Correlation Matrix</div>', unsafe_allow_html=True)
-        feature_group = st.selectbox("Feature group", ["_mean", "_se", "_worst", "All"])
-        if feature_group == "All":
+        feature_group = st.selectbox("Feature group", ["_mean", "_se", "_worst", "All (first 15)"])
+        if "All" in feature_group:
             cols_hm = X_raw.columns.tolist()[:15]
         else:
             cols_hm = [c for c in X_raw.columns if feature_group in c]
-
         corr = X_raw[cols_hm].corr()
         fig = px.imshow(corr, color_continuous_scale="RdBu_r", zmin=-1, zmax=1,
                         text_auto=".2f", title=f"Correlation Matrix — {feature_group} features",
@@ -337,7 +365,6 @@ elif page == "🔍 EDA":
         fig.update_layout(height=500, paper_bgcolor=C['bg'], font_color=C['text'])
         st.plotly_chart(fig, use_container_width=True)
 
-    # ── Tab 4: Feature Distributions ──────────────────────────────────────────
     with tab4:
         st.markdown('<div class="sec-title">Feature Distribution by Diagnosis</div>', unsafe_allow_html=True)
         feat_sel = st.selectbox("Select feature", X_raw.columns.tolist())
@@ -365,55 +392,51 @@ elif page == "🤖 Model Comparison":
         'ROC-AUC': v['ROC-AUC'], 'CV_Mean': v['CV_Mean'], 'CV_Std': v['CV_Std']
     } for k, v in results.items()]).sort_values('F1-Score', ascending=False).reset_index(drop=True)
 
-    # Metric cards for best model
-    st.markdown(f'<div class="sec-title">Best Model: {best_name}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sec-title">Best Model: {BEST_MODEL_NAME} (Saved Pipeline)</div>', unsafe_allow_html=True)
     mc1,mc2,mc3,mc4,mc5 = st.columns(5)
-    kpi(mc1, f"{best['Accuracy']:.4f}",  "Accuracy",  C['primary'])
-    kpi(mc2, f"{best['Precision']:.4f}", "Precision", C['benign'])
-    kpi(mc3, f"{best['Recall']:.4f}",    "Recall",    C['malignant'])
-    kpi(mc4, f"{best['F1-Score']:.4f}",  "F1-Score",  C['primary'])
-    kpi(mc5, f"{best['ROC-AUC']:.4f}",   "ROC-AUC",   C['primary'])
+    kpi(mc1, f"{SAVED_METRICS['Accuracy']:.4f}",  "Accuracy",  C['primary'])
+    kpi(mc2, f"{SAVED_METRICS['Precision']:.4f}", "Precision", C['benign'])
+    kpi(mc3, f"{SAVED_METRICS['Recall']:.4f}",    "Recall",    C['malignant'])
+    kpi(mc4, f"{SAVED_METRICS['F1-Score']:.4f}",  "F1-Score",  C['primary'])
+    kpi(mc5, f"{SAVED_METRICS['ROC-AUC']:.4f}",   "ROC-AUC",   C['primary'])
 
     st.divider()
+    tab_a, tab_b, tab_c, tab_d = st.tabs(["Accuracy & CV", "All Metrics", "ROC Curves", "Confusion Matrix"])
 
-    tab_a, tab_b, tab_c, tab_d = st.tabs(["Accuracy", "All Metrics", "ROC Curves", "Confusion Matrix"])
-
-    # ── Accuracy ───────────────────────────────────────────────────────────────
     with tab_a:
         fig = make_subplots(rows=1, cols=2, subplot_titles=("Accuracy", "Cross-Validation Mean ± Std"))
-        colors_bar = [C['malignant'] if m == best_name else C['primary'] for m in comp_df['Model']]
+        colors_bar = [C['malignant'] if m == BEST_MODEL_NAME else C['primary'] for m in comp_df['Model']]
         fig.add_trace(go.Bar(x=comp_df['Accuracy'], y=comp_df['Model'], orientation='h',
                              marker_color=colors_bar, text=[f"{v:.4f}" for v in comp_df['Accuracy']],
                              textposition='outside', name='Accuracy'), row=1, col=1)
         fig.add_trace(go.Bar(x=comp_df['CV_Mean'], y=comp_df['Model'], orientation='h',
                              error_x=dict(type='data', array=comp_df['CV_Std']),
                              marker_color=colors_bar, name='CV Mean'), row=1, col=2)
-        fig.add_vline(x=best['Accuracy'], line_dash='dash', line_color=C['malignant'], row=1, col=1)
-        fig.add_vline(x=best['CV_Mean'],  line_dash='dash', line_color=C['malignant'], row=1, col=2)
+        fig.add_vline(x=SAVED_METRICS['Accuracy'], line_dash='dash', line_color=C['malignant'], row=1, col=1)
         fig.update_xaxes(range=[0.80, 1.0])
         fig.update_layout(height=380, showlegend=False, **PLOT_LAYOUT)
         st.plotly_chart(fig, use_container_width=True)
 
-    # ── All Metrics ────────────────────────────────────────────────────────────
     with tab_b:
         metric_sel = st.multiselect("Metrics", ['Accuracy','Precision','Recall','F1-Score','ROC-AUC'],
-                                     default=['Accuracy','Precision','Recall','F1-Score'])
+                                    default=['Accuracy','Precision','Recall','F1-Score'])
         fig = go.Figure()
-        metric_colors = {'Accuracy':C['primary'],'Precision':'#f39c12','Recall':C['benign'],'F1-Score':C['malignant'],'ROC-AUC':'#9b59b6'}
+        metric_colors = {'Accuracy':C['primary'],'Precision':'#f39c12','Recall':C['benign'],
+                         'F1-Score':C['malignant'],'ROC-AUC':'#9b59b6'}
         for m in metric_sel:
             fig.add_trace(go.Bar(x=comp_df[m], y=comp_df['Model'], orientation='h',
                                  name=m, marker_color=metric_colors.get(m, C['primary']), opacity=0.85))
         fig.update_layout(barmode='group', height=420, xaxis_range=[0.80, 1.0], **PLOT_LAYOUT)
         st.plotly_chart(fig, use_container_width=True)
 
-    # ── ROC Curves ─────────────────────────────────────────────────────────────
     with tab_c:
         fig = go.Figure()
         palette = [C['primary'], C['benign'], C['malignant'], '#f39c12', '#9b59b6', '#1abc9c', '#e67e22']
         for i, (name, res) in enumerate(results.items()):
             fpr, tpr, _ = roc_curve(y_test, res['y_proba'])
-            lw = 3 if name == best_name else 1.5
-            fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines', name=f"{name} (AUC={res['ROC-AUC']:.4f})",
+            lw = 3 if name == BEST_MODEL_NAME else 1.5
+            fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines',
+                                     name=f"{name} (AUC={res['ROC-AUC']:.4f})",
                                      line=dict(color=palette[i % len(palette)], width=lw)))
         fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode='lines', name='Random',
                                  line=dict(color=C['muted'], dash='dash', width=1)))
@@ -421,10 +444,10 @@ elif page == "🤖 Model Comparison":
                           yaxis_title='True Positive Rate', title='ROC Curves — All Models', **PLOT_LAYOUT)
         st.plotly_chart(fig, use_container_width=True)
 
-    # ── Confusion Matrix ───────────────────────────────────────────────────────
     with tab_d:
         model_sel = st.selectbox("Select model", list(results.keys()),
-                                  index=list(results.keys()).index(best_name))
+                                  index=list(results.keys()).index(BEST_MODEL_NAME)
+                                  if BEST_MODEL_NAME in results else 0)
         cm = confusion_matrix(y_test, results[model_sel]['y_pred'])
         fig = px.imshow(cm, text_auto=True, color_continuous_scale='Blues',
                         x=['Benign (0)', 'Malignant (1)'], y=['Benign (0)', 'Malignant (1)'],
@@ -432,12 +455,11 @@ elif page == "🤖 Model Comparison":
                         title=f"Confusion Matrix — {model_sel}")
         fig.update_layout(height=380, paper_bgcolor=C['bg'], font_color=C['text'])
         st.plotly_chart(fig, use_container_width=True)
-
         tn, fp, fn, tp = cm.ravel()
-        cc1,cc2,cc3,cc4 = st.columns(4)
-        kpi(cc1, tn, "True Negative",  C['benign'])
-        kpi(cc2, tp, "True Positive",  C['benign'])
-        kpi(cc3, fp, "False Positive", C['malignant'])
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        kpi(cc1, tn, "True Negative",             C['benign'])
+        kpi(cc2, tp, "True Positive",             C['benign'])
+        kpi(cc3, fp, "False Positive",            C['malignant'])
         kpi(cc4, fn, "False Negative (critical!)", C['malignant'])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -445,75 +467,77 @@ elif page == "🤖 Model Comparison":
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "🎯 Predict":
     st.markdown("# 🎯 Tumor Diagnosis Predictor")
-    st.markdown(f"Enter cell measurement values below. The **{best_name}** model will predict whether the tumor is **Benign** or **Malignant**.")
+    st.markdown(
+        f"Enter cell measurement values below. "
+        f"The **{BEST_MODEL_NAME}** pipeline will predict whether the tumor is **Benign** or **Malignant**."
+    )
     st.divider()
 
-    st.markdown('<div class="warn-box">⚠️ <strong>Medical Disclaimer:</strong> This tool is for educational and research purposes only. It is not a substitute for professional medical diagnosis. Always consult a qualified healthcare provider.</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="warn-box">⚠️ <strong>Medical Disclaimer:</strong> '
+        'This tool is for educational and research purposes only. '
+        'It is not a substitute for professional medical diagnosis. '
+        'Always consult a qualified healthcare provider.</div>',
+        unsafe_allow_html=True
+    )
+
+    if not PIPELINE_LOADED:
+        st.error("Saved pipeline not found. Place `breast_cancer_pipeline.pkl` next to `app.py`.")
+        st.stop()
+
     st.divider()
 
-    # Compute stats for smart defaults
-    stats = X_raw.describe()
+    # Feature stats from raw data for slider bounds
+    stats = X_raw[ORIG_FEATURES].describe()
 
-    # Group features into _mean, _se, _worst
-    mean_feats  = [c for c in ORIG_FEATURES if c.endswith('_mean')]
-    se_feats    = [c for c in ORIG_FEATURES if c.endswith('_se')]
-    worst_feats = [c for c in ORIG_FEATURES if c.endswith('_worst')]
+    # Median fill helpers
+    X_b_med = X_raw[y_raw == 0][ORIG_FEATURES].median()
+    X_m_med = X_raw[y_raw == 1][ORIG_FEATURES].median()
+    X_med   = X_raw[ORIG_FEATURES].median()
 
     st.markdown("**Quick fill:**")
     qc1, qc2, qc3 = st.columns(3)
-    fill_benign   = qc1.button("Fill with Benign median values",   use_container_width=True)
-    fill_malign   = qc2.button("Fill with Malignant median values", use_container_width=True)
-    fill_reset    = qc3.button("Reset to overall median",           use_container_width=True)
-
-    # Compute medians
-    X_b_med = X_raw[y_raw == 0].median()
-    X_m_med = X_raw[y_raw == 1].median()
-    X_med   = X_raw.median()
+    fill_benign = qc1.button("Fill with Benign median values",    use_container_width=True)
+    fill_malign = qc2.button("Fill with Malignant median values", use_container_width=True)
+    fill_reset  = qc3.button("Reset to overall median",           use_container_width=True)
 
     def get_default(col):
-        if fill_benign:  return float(X_b_med[col])
-        if fill_malign:  return float(X_m_med[col])
+        if fill_benign: return float(X_b_med[col])
+        if fill_malign: return float(X_m_med[col])
         return float(X_med[col])
 
     input_vals = {}
 
-    st.markdown('<div class="sec-title">📐 Mean Features</div>', unsafe_allow_html=True)
-    cols_m = st.columns(5)
-    for i, feat in enumerate(mean_feats):
-        with cols_m[i % 5]:
-            input_vals[feat] = st.number_input(
-                feat, min_value=float(stats[feat]['min']),
-                max_value=float(stats[feat]['max']),
-                value=get_default(feat),
-                format="%.4f", key=f"inp_{feat}"
-            )
+    mean_feats  = [c for c in ORIG_FEATURES if c.endswith('_mean')]
+    se_feats    = [c for c in ORIG_FEATURES if c.endswith('_se')]
+    worst_feats = [c for c in ORIG_FEATURES if c.endswith('_worst')]
+    other_feats = [c for c in ORIG_FEATURES if c not in mean_feats + se_feats + worst_feats]
 
-    st.markdown('<div class="sec-title">📏 Standard Error Features</div>', unsafe_allow_html=True)
-    cols_s = st.columns(5)
-    for i, feat in enumerate(se_feats):
-        with cols_s[i % 5]:
-            input_vals[feat] = st.number_input(
-                feat, min_value=float(stats[feat]['min']),
-                max_value=float(stats[feat]['max']),
-                value=get_default(feat),
-                format="%.4f", key=f"inp_{feat}"
-            )
+    for group_label, group_feats in [
+        ("📐 Mean Features",           mean_feats),
+        ("📏 Standard Error Features", se_feats),
+        ("⚠️ Worst Features",          worst_feats),
+    ] + ([("📋 Other Features", other_feats)] if other_feats else []):
 
-    st.markdown('<div class="sec-title">⚠️ Worst Features</div>', unsafe_allow_html=True)
-    cols_w = st.columns(5)
-    for i, feat in enumerate(worst_feats):
-        with cols_w[i % 5]:
-            input_vals[feat] = st.number_input(
-                feat, min_value=float(stats[feat]['min']),
-                max_value=float(stats[feat]['max']),
-                value=get_default(feat),
-                format="%.4f", key=f"inp_{feat}"
-            )
+        st.markdown(f'<div class="sec-title">{group_label}</div>', unsafe_allow_html=True)
+        cols = st.columns(5)
+        for i, feat in enumerate(group_feats):
+            with cols[i % 5]:
+                input_vals[feat] = st.number_input(
+                    feat,
+                    min_value=float(stats[feat]['min']),
+                    max_value=float(stats[feat]['max']),
+                    value=get_default(feat),
+                    format="%.4f",
+                    key=f"inp_{feat}"
+                )
 
     st.divider()
 
     if st.button("🔬 Run Prediction", use_container_width=True, type="primary"):
+        # Build input DataFrame with EXACTLY the columns the pipeline was trained on
         input_df = pd.DataFrame([input_vals])[ORIG_FEATURES]
+
         pred        = final_pipeline.predict(input_df)[0]
         proba       = final_pipeline.predict_proba(input_df)[0]
         prob_benign = proba[0]
@@ -527,7 +551,7 @@ elif page == "🎯 Predict":
                 <div class="result-box benign-box">
                     <div class="result-label" style="color:{C['benign']}">✅ BENIGN</div>
                     <div class="result-sub">The model predicts this tumor is <strong>benign (non-cancerous)</strong>.</div>
-                    <div style="font-size:1.5rem; margin-top:12px; color:{C['benign']}">
+                    <div style="font-size:1.5rem;margin-top:12px;color:{C['benign']}">
                         Confidence: {prob_benign*100:.1f}%
                     </div>
                 </div>""", unsafe_allow_html=True)
@@ -536,7 +560,7 @@ elif page == "🎯 Predict":
                 <div class="result-box malign-box">
                     <div class="result-label" style="color:{C['malignant']}">⚠️ MALIGNANT</div>
                     <div class="result-sub">The model predicts this tumor is <strong>malignant (potentially cancerous)</strong>.</div>
-                    <div style="font-size:1.5rem; margin-top:12px; color:{C['malignant']}">
+                    <div style="font-size:1.5rem;margin-top:12px;color:{C['malignant']}">
                         Confidence: {prob_malig*100:.1f}%
                     </div>
                 </div>""", unsafe_allow_html=True)
@@ -544,34 +568,32 @@ elif page == "🎯 Predict":
         with right:
             fig = go.Figure(go.Bar(
                 x=['Benign', 'Malignant'],
-                y=[prob_benign * 100, prob_malig * 100],
+                y=[prob_benign*100, prob_malig*100],
                 marker_color=[C['benign'], C['malignant']],
                 text=[f"{prob_benign*100:.1f}%", f"{prob_malig*100:.1f}%"],
                 textposition='outside', width=0.4,
             ))
-            fig.update_layout(
-                height=300, yaxis_range=[0, 115],
-                yaxis_title="Probability (%)",
-                title="Prediction Probability",
-                **PLOT_LAYOUT
-            )
+            fig.update_layout(height=300, yaxis_range=[0, 115],
+                              yaxis_title="Probability (%)",
+                              title="Prediction Probability", **PLOT_LAYOUT)
             st.plotly_chart(fig, use_container_width=True)
 
-        # Engineered feature values
+        # Engineered features (informational)
         st.divider()
-        st.markdown('<div class="sec-title">🧬 Engineered Features (auto-calculated)</div>', unsafe_allow_html=True)
-        fe_transformer = FeatureEngineeringTransformer()
-        fe_transformer.fit(X_raw)
-        eng = fe_transformer.transform(input_df)
+        st.markdown('<div class="sec-title">🧬 Engineered Features (auto-calculated by pipeline)</div>',
+                    unsafe_allow_html=True)
+        fe_t = FeatureEngineeringTransformer()
+        fe_t.fit(X_raw[ORIG_FEATURES])
+        eng = fe_t.transform(input_df)
         e1, e2, e3 = st.columns(3)
-        e1.metric("radius_area_ratio",        f"{eng['radius_area_ratio'].values[0]:.4f}")
-        e2.metric("perimeter_area_ratio",     f"{eng['perimeter_area_ratio'].values[0]:.4f}")
-        e3.metric("concavity_points_product", f"{eng['concavity_points_product'].values[0]:.4f}")
+        e1.metric("radius_area_ratio",        f"{eng['radius_area_ratio'].values[0]:.6f}")
+        e2.metric("perimeter_area_ratio",     f"{eng['perimeter_area_ratio'].values[0]:.6f}")
+        e3.metric("concavity_points_product", f"{eng['concavity_points_product'].values[0]:.6f}")
 
         # Risk flag
         if pred == 1 and prob_malig > 0.8:
             st.error("🚨 **High-confidence malignant prediction.** Please consult a medical professional immediately.")
-        elif pred == 1 and prob_malig <= 0.8:
+        elif pred == 1:
             st.warning("⚠️ **Malignant prediction with moderate confidence.** Further clinical evaluation recommended.")
         else:
             st.success("✅ Benign prediction. Regular check-ups are still recommended.")
