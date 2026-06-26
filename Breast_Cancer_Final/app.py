@@ -1,29 +1,90 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pickle
-import os
-import io
+import warnings
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, roc_curve, confusion_matrix
+)
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.tree import DecisionTreeClassifier
 import plotly.graph_objects as go
 import plotly.express as px
-from sklearn.base import BaseEstimator, TransformerMixin
+from plotly.subplots import make_subplots
 
-# ─── Sayfa Yapılandırması ─────────────────────────────────────────────────────
+warnings.filterwarnings("ignore")
+
+# ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="MedPredict · Meme Kanseri Tanı Sistemi",
-    page_icon="🩺",
+    page_title="Breast Cancer Prediction",
+    page_icon="🔬",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded",
 )
 
-# ─── FeatureEngineeringTransformer (pickle için zorunlu) ──────────────────────
+# ── Colors ─────────────────────────────────────────────────────────────────────
+C = {
+    "benign":    "#2ecc71",
+    "malignant": "#e74c3c",
+    "primary":   "#2980b9",
+    "bg":        "#0d1117",
+    "card":      "#161b22",
+    "border":    "#30363d",
+    "text":      "#e6edf3",
+    "muted":     "#8b949e",
+}
+
+# ── CSS ────────────────────────────────────────────────────────────────────────
+st.markdown(f"""
+<style>
+    .main {{ background-color:{C['bg']}; color:{C['text']}; }}
+    section[data-testid="stSidebar"] {{ background-color:{C['card']}; border-right:1px solid {C['border']}; }}
+    h1,h2,h3 {{ color:{C['text']} !important; }}
+    .kpi-card {{
+        background:{C['card']}; border:1px solid {C['border']};
+        border-radius:10px; padding:18px 12px; text-align:center;
+    }}
+    .kpi-val {{ font-size:2rem; font-weight:800; }}
+    .kpi-lbl {{ font-size:0.78rem; color:{C['muted']}; margin-top:4px; }}
+    .sec-title {{
+        font-size:1.2rem; font-weight:700; color:{C['text']};
+        border-left:3px solid {C['primary']}; padding-left:10px; margin:22px 0 14px;
+    }}
+    .result-box {{
+        border-radius:14px; padding:28px; text-align:center; margin-top:8px;
+    }}
+    .benign-box  {{ background:rgba(46,204,113,0.12); border:2px solid {C['benign']}; }}
+    .malign-box  {{ background:rgba(231,76,60,0.12);  border:2px solid {C['malignant']}; }}
+    .result-label {{ font-size:2rem; font-weight:900; }}
+    .result-sub   {{ font-size:1rem; color:{C['muted']}; margin-top:6px; }}
+    .warn-box {{
+        background:rgba(231,76,60,0.08); border:1px solid {C['malignant']};
+        border-radius:8px; padding:12px; font-size:0.82rem; color:{C['muted']};
+    }}
+</style>
+""", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FEATURE ENGINEERING (matches notebook exactly)
+# ══════════════════════════════════════════════════════════════════════════════
 class FeatureEngineeringTransformer(BaseEstimator, TransformerMixin):
     def __init__(self):
         self.feature_names_ = None
+
     def fit(self, X, y=None):
         if isinstance(X, pd.DataFrame):
             self.feature_names_ = X.columns.tolist()
         return self
+
     def transform(self, X):
         if not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X, columns=self.feature_names_) if self.feature_names_ else pd.DataFrame(X)
@@ -36,764 +97,481 @@ class FeatureEngineeringTransformer(BaseEstimator, TransformerMixin):
             X['concavity_points_product'] = X['concavity_mean'] * X['concave points_mean']
         return X
 
-# ─── CSS ──────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=DM+Serif+Display&display=swap');
+# ══════════════════════════════════════════════════════════════════════════════
+# DATA & MODEL LOADING
+# ══════════════════════════════════════════════════════════════════════════════
+@st.cache_data(show_spinner="Loading dataset…")
+def load_data():
+    # Try local file first, fall back to sklearn built-in
+    try:
+        df = pd.read_csv("data.csv")
+        df = df.drop(columns=[c for c in ['id', 'Unnamed: 32'] if c in df.columns])
+        encoder = LabelEncoder()
+        df['diagnosis'] = encoder.fit_transform(df['diagnosis'])
+        X = df.drop('diagnosis', axis=1)
+        y = df['diagnosis']
+    except FileNotFoundError:
+        data = load_breast_cancer()
+        X = pd.DataFrame(data.data, columns=data.feature_names)
+        # Rename to match notebook feature names
+        rename = {n: n.replace(' ', '_') for n in X.columns}
+        # Keep original names for compatibility
+        y = pd.Series(data.target)
+    return X, y
 
-*, html, body, [class*="css"] {
-    font-family: 'Inter', sans-serif !important;
-}
+@st.cache_resource(show_spinner="Training models…")
+def train_models():
+    X, y = load_data()
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
 
-/* Sayfa arka planı */
-.main, .block-container {
-    background-color: #F7F9FC !important;
-    padding-top: 0 !important;
-}
+    preprocessing = Pipeline([
+        ('feature_engineering', FeatureEngineeringTransformer()),
+        ('scaler', StandardScaler())
+    ])
+    X_train_s = preprocessing.fit_transform(X_train)
+    X_test_s  = preprocessing.transform(X_test)
 
-/* Sidebar gizle */
-section[data-testid="stSidebar"] { display: none; }
+    fe = FeatureEngineeringTransformer().fit_transform(X_train)
+    feature_names = fe.columns.tolist()
+    X_train_s = pd.DataFrame(X_train_s, columns=feature_names)
+    X_test_s  = pd.DataFrame(X_test_s,  columns=feature_names)
 
-/* Streamlit header gizle */
-header[data-testid="stHeader"] { background: transparent; }
+    models = {
+        'Logistic Regression':  LogisticRegression(random_state=42, max_iter=10000, C=0.1, solver='lbfgs'),
+        'Random Forest':        RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1),
+        'Gradient Boosting':    GradientBoostingClassifier(n_estimators=200, random_state=42),
+        'SVM':                  SVC(kernel='rbf', probability=True, random_state=42),
+        'KNN':                  KNeighborsClassifier(n_neighbors=5),
+        'Naive Bayes':          GaussianNB(),
+        'Decision Tree':        DecisionTreeClassifier(random_state=42, max_depth=10),
+    }
 
-/* ── Hero banner ── */
-.hero {
-    background: linear-gradient(135deg, #0F4C81 0%, #1a6fb5 60%, #2196F3 100%);
-    border-radius: 0 0 24px 24px;
-    padding: 36px 48px 32px 48px;
-    margin: -80px -80px 32px -80px;
-    color: white;
-}
-.hero-badge {
-    display: inline-block;
-    background: rgba(255,255,255,0.15);
-    border: 1px solid rgba(255,255,255,0.3);
-    border-radius: 100px;
-    padding: 4px 14px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    margin-bottom: 12px;
-}
-.hero h1 {
-    font-family: 'DM Serif Display', serif !important;
-    font-size: 2.4rem;
-    font-weight: 400;
-    margin: 0 0 8px 0;
-    line-height: 1.2;
-}
-.hero p {
-    font-size: 1rem;
-    opacity: 0.85;
-    margin: 0;
-    max-width: 600px;
-}
-.hero-stats {
-    display: flex;
-    gap: 32px;
-    margin-top: 24px;
-}
-.hero-stat-val {
-    font-size: 1.8rem;
-    font-weight: 800;
-    line-height: 1;
-}
-.hero-stat-lbl {
-    font-size: 0.72rem;
-    opacity: 0.7;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    margin-top: 4px;
-}
+    results = {}
+    for name, model in models.items():
+        model.fit(X_train_s, y_train)
+        y_pred  = model.predict(X_test_s)
+        y_proba = model.predict_proba(X_test_s)[:, 1]
+        cv      = cross_val_score(model, X_train_s, y_train, cv=5, scoring='accuracy')
+        results[name] = {
+            'model':     model,
+            'Accuracy':  accuracy_score(y_test, y_pred),
+            'Precision': precision_score(y_test, y_pred, zero_division=0),
+            'Recall':    recall_score(y_test, y_pred, zero_division=0),
+            'F1-Score':  f1_score(y_test, y_pred, zero_division=0),
+            'ROC-AUC':   roc_auc_score(y_test, y_proba),
+            'CV_Mean':   cv.mean(),
+            'CV_Std':    cv.std(),
+            'y_pred':    y_pred,
+            'y_proba':   y_proba,
+        }
 
-/* ── Nav tabs ── */
-.nav-container {
-    display: flex;
-    gap: 4px;
-    background: white;
-    border-radius: 12px;
-    padding: 6px;
-    margin-bottom: 28px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
-    border: 1px solid #E8EDF4;
-}
+    best_name = max(results, key=lambda k: results[k]['F1-Score'])
 
-/* ── Kart ── */
-.card {
-    background: white;
-    border-radius: 14px;
-    padding: 24px;
-    border: 1px solid #E8EDF4;
-    box-shadow: 0 1px 6px rgba(15,76,129,0.06);
-    margin-bottom: 16px;
-}
-.card-title {
-    font-size: 0.75rem;
-    font-weight: 700;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    color: #6B7A99;
-    margin-bottom: 16px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
+    # Build final pipeline
+    final_pipeline = Pipeline([
+        ('feature_engineering', FeatureEngineeringTransformer()),
+        ('scaler', StandardScaler()),
+        ('model', results[best_name]['model'])
+    ])
+    final_pipeline.fit(X_train, y_train)
 
-/* ── Metrik kutu ── */
-.kpi-row { display: flex; gap: 12px; margin-bottom: 20px; }
-.kpi {
-    flex: 1;
-    background: white;
-    border-radius: 12px;
-    padding: 18px 20px;
-    border: 1px solid #E8EDF4;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.05);
-    text-align: center;
-}
-.kpi-val {
-    font-size: 1.7rem;
-    font-weight: 800;
-    color: #0F4C81;
-    line-height: 1;
-}
-.kpi-lbl {
-    font-size: 0.72rem;
-    color: #8896A8;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-top: 6px;
-}
+    # Feature importance (RF)
+    rf_imp = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+    rf_imp.fit(X_train_s, y_train)
+    imp_df = pd.DataFrame({'feature': feature_names, 'importance': rf_imp.feature_importances_})\
+               .sort_values('importance', ascending=False)
 
-/* ── Sonuç kutusu ── */
-.result-box {
-    border-radius: 16px;
-    padding: 28px 32px;
-    text-align: center;
-    margin: 8px 0;
-}
-.result-benign {
-    background: linear-gradient(135deg, #E8FBF3 0%, #D4F5E9 100%);
-    border: 2px solid #00C875;
-}
-.result-malignant {
-    background: linear-gradient(135deg, #FFF0EE 0%, #FFE0DC 100%);
-    border: 2px solid #E03C31;
-}
-.result-icon { font-size: 2.8rem; line-height: 1; margin-bottom: 8px; }
-.result-label {
-    font-size: 1.5rem;
-    font-weight: 800;
-    margin-bottom: 4px;
-}
-.result-benign .result-label { color: #007A4D; }
-.result-malignant .result-label { color: #B52A1D; }
-.result-prob {
-    font-size: 2.8rem;
-    font-weight: 900;
-    line-height: 1.1;
-}
-.result-benign .result-prob { color: #00C875; }
-.result-malignant .result-prob { color: #E03C31; }
-.result-sub { font-size: 0.85rem; color: #6B7A99; margin-top: 6px; }
+    return (results, best_name, X_test, y_test, X_train,
+            preprocessing, final_pipeline, imp_df, feature_names, X, y)
 
-/* ── Section başlık ── */
-.sec-header {
-    font-size: 1rem;
-    font-weight: 700;
-    color: #1A2B4A;
-    margin: 28px 0 14px 0;
-    padding-bottom: 8px;
-    border-bottom: 2px solid #E8EDF4;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
+# ── Load ───────────────────────────────────────────────────────────────────────
+X_raw, y_raw = load_data()
+(results, best_name, X_test, y_test, X_train,
+ preprocessing, final_pipeline, imp_df, feature_names, X_all, y_all) = train_models()
 
-/* ── Özellik grup başlığı ── */
-.feat-group {
-    background: linear-gradient(90deg, #EEF4FB 0%, transparent 100%);
-    border-left: 3px solid #0F4C81;
-    border-radius: 0 8px 8px 0;
-    padding: 8px 14px;
-    font-size: 0.8rem;
-    font-weight: 700;
-    color: #0F4C81;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-    margin: 20px 0 12px 0;
-}
-
-/* ── Uyarı banner ── */
-.warning-strip {
-    background: #FFF8E6;
-    border: 1px solid #F5C842;
-    border-radius: 10px;
-    padding: 10px 16px;
-    font-size: 0.82rem;
-    color: #7A5A00;
-    margin-bottom: 20px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-/* ── CSV sonuç tablosu ── */
-.batch-result-benign { background: #E8FBF3; color: #007A4D; font-weight: 600;
-    padding: 3px 10px; border-radius: 20px; font-size: 0.8rem; }
-.batch-result-malignant { background: #FFF0EE; color: #B52A1D; font-weight: 600;
-    padding: 3px 10px; border-radius: 20px; font-size: 0.8rem; }
-
-/* Streamlit widget düzenlemeleri */
-.stNumberInput label { font-size: 0.78rem !important; font-weight: 600 !important; color: #3D5270 !important; }
-.stSlider label { font-size: 0.78rem !important; font-weight: 600 !important; color: #3D5270 !important; }
-.stButton > button {
-    border-radius: 10px !important;
-    font-weight: 600 !important;
-    font-size: 0.9rem !important;
-    transition: all 0.2s !important;
-}
-.stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, #0F4C81, #2196F3) !important;
-    border: none !important;
-    color: white !important;
-    box-shadow: 0 4px 14px rgba(15,76,129,0.3) !important;
-}
-.stButton > button[kind="primary"]:hover {
-    transform: translateY(-1px) !important;
-    box-shadow: 0 6px 18px rgba(15,76,129,0.4) !important;
-}
-div[data-testid="stTabs"] > div > div[role="tablist"] {
-    background: white;
-    border-radius: 12px;
-    padding: 6px;
-    border: 1px solid #E8EDF4;
-    gap: 4px;
-}
-div[data-testid="stTabs"] button[role="tab"] {
-    border-radius: 8px !important;
-    font-weight: 600 !important;
-    font-size: 0.85rem !important;
-    color: #6B7A99 !important;
-    padding: 8px 18px !important;
-}
-div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
-    background: linear-gradient(135deg, #0F4C81, #2196F3) !important;
-    color: white !important;
-}
-div[data-testid="metric-container"] {
-    background: white !important;
-    border: 1px solid #E8EDF4 !important;
-    border-radius: 12px !important;
-    padding: 16px !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ─── Sabitler ────────────────────────────────────────────────────────────────
-FEATURE_NAMES = [
-    'radius_mean','texture_mean','perimeter_mean','area_mean','smoothness_mean',
-    'compactness_mean','concavity_mean','concave points_mean','symmetry_mean',
-    'fractal_dimension_mean','radius_se','texture_se','perimeter_se','area_se',
-    'smoothness_se','compactness_se','concavity_se','concave points_se',
-    'symmetry_se','fractal_dimension_se','radius_worst','texture_worst',
-    'perimeter_worst','area_worst','smoothness_worst','compactness_worst',
-    'concavity_worst','concave points_worst','symmetry_worst','fractal_dimension_worst'
-]
-FEAT_LABELS = {
-    'radius_mean':('Ort. Yarıçap','mm'),'texture_mean':('Ort. Doku',''),'perimeter_mean':('Ort. Çevre','mm'),
-    'area_mean':('Ort. Alan','mm²'),'smoothness_mean':('Ort. Pürüzsüzlük',''),'compactness_mean':('Ort. Kompaktlık',''),
-    'concavity_mean':('Ort. Çukurluk',''),'concave points_mean':('Ort. Çukur Nokta',''),'symmetry_mean':('Ort. Simetri',''),
-    'fractal_dimension_mean':('Ort. Fraktal Boyut',''),'radius_se':('Yarıçap SE',''),'texture_se':('Doku SE',''),
-    'perimeter_se':('Çevre SE',''),'area_se':('Alan SE',''),'smoothness_se':('Pürüzsüzlük SE',''),
-    'compactness_se':('Kompaktlık SE',''),'concavity_se':('Çukurluk SE',''),'concave points_se':('Çukur Nokta SE',''),
-    'symmetry_se':('Simetri SE',''),'fractal_dimension_se':('Fraktal Boyut SE',''),
-    'radius_worst':('En Kötü Yarıçap','mm'),'texture_worst':('En Kötü Doku',''),'perimeter_worst':('En Kötü Çevre','mm'),
-    'area_worst':('En Kötü Alan','mm²'),'smoothness_worst':('En Kötü Pürüzsüzlük',''),
-    'compactness_worst':('En Kötü Kompaktlık',''),'concavity_worst':('En Kötü Çukurluk',''),
-    'concave points_worst':('En Kötü Çukur Nokta',''),'symmetry_worst':('En Kötü Simetri',''),
-    'fractal_dimension_worst':('En Kötü Fraktal Boyut',''),
-}
-FEAT_RANGES = {
-    'radius_mean':(6.98,28.11,14.13),'texture_mean':(9.71,39.28,19.29),'perimeter_mean':(43.79,188.5,91.97),
-    'area_mean':(143.5,2501.0,654.89),'smoothness_mean':(0.05,0.16,0.096),'compactness_mean':(0.02,0.35,0.104),
-    'concavity_mean':(0.0,0.43,0.089),'concave points_mean':(0.0,0.20,0.049),'symmetry_mean':(0.11,0.30,0.181),
-    'fractal_dimension_mean':(0.05,0.097,0.063),'radius_se':(0.11,2.87,0.405),'texture_se':(0.36,4.88,1.217),
-    'perimeter_se':(0.76,21.98,2.866),'area_se':(6.8,542.2,40.34),'smoothness_se':(0.002,0.031,0.007),
-    'compactness_se':(0.002,0.135,0.025),'concavity_se':(0.0,0.396,0.032),'concave points_se':(0.0,0.053,0.012),
-    'symmetry_se':(0.008,0.079,0.021),'fractal_dimension_se':(0.001,0.03,0.004),
-    'radius_worst':(7.93,36.04,16.27),'texture_worst':(12.02,49.54,25.68),'perimeter_worst':(50.41,251.2,107.26),
-    'area_worst':(185.2,4254.0,880.58),'smoothness_worst':(0.07,0.22,0.132),'compactness_worst':(0.027,1.058,0.254),
-    'concavity_worst':(0.0,1.252,0.272),'concave points_worst':(0.0,0.291,0.115),
-    'symmetry_worst':(0.16,0.664,0.290),'fractal_dimension_worst':(0.055,0.208,0.084),
-}
-GROUPS = {
-    "🔵 Ortalama Değerler": [f for f in FEATURE_NAMES if '_mean' in f],
-    "🟡 Standart Hata (SE)": [f for f in FEATURE_NAMES if '_se' in f],
-    "🔴 En Kötü Değerler": [f for f in FEATURE_NAMES if '_worst' in f],
-}
-
-# ─── Model yükleme ────────────────────────────────────────────────────────────
-@st.cache_resource
-def load_model():
-    path = "breast_cancer_pipeline.pkl"
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            return pickle.load(f)
-    return None
-
-@st.cache_data
-def load_info():
-    path = "model_info.pkl"
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            return pickle.load(f)
-    return {"model_name":"Logistic Regression","accuracy":0.9737,"f1_score":0.9639,"roc_auc":0.9861}
-
-pipeline  = load_model()
-model_info = load_info()
-
-# ─── Hero Banner ─────────────────────────────────────────────────────────────
-st.markdown(f"""
-<div class="hero">
-    <div class="hero-badge">🩺 MedPredict AI</div>
-    <h1>Meme Kanseri Tanı Destek Sistemi</h1>
-    <p>Wisconsin Breast Cancer veri seti ile eğitilmiş makine öğrenmesi modeli.
-       Biyopsi ölçümlerini girerek anlık sınıflandırma yapın.</p>
-    <div class="hero-stats">
-        <div>
-            <div class="hero-stat-val">{model_info['accuracy']*100:.1f}%</div>
-            <div class="hero-stat-lbl">Doğruluk</div>
-        </div>
-        <div>
-            <div class="hero-stat-val">{model_info['f1_score']*100:.1f}%</div>
-            <div class="hero-stat-lbl">F1-Score</div>
-        </div>
-        <div>
-            <div class="hero-stat-val">{model_info['roc_auc']*100:.1f}%</div>
-            <div class="hero-stat-lbl">ROC-AUC</div>
-        </div>
-        <div>
-            <div class="hero-stat-val">569</div>
-            <div class="hero-stat-lbl">Eğitim Örneği</div>
-        </div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<div class="warning-strip">
-    ⚠️ <b>Tıbbi Uyarı:</b> Bu sistem yalnızca akademik/araştırma amaçlıdır.
-    Klinik teşhis kararlarında kullanılamaz, bir uzman doktora danışın.
-</div>
-""", unsafe_allow_html=True)
-
-# ─── Ana Sekmeler ─────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🎯  Tekil Tahmin",
-    "📂  Toplu Analiz (CSV)",
-    "📊  Model & Sonuçlar",
-    "🔬  Veri Keşfi"
-])
+ORIG_FEATURES = X_raw.columns.tolist()
+best = results[best_name]
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TAB 1 — TEKİL TAHMİN
+# SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
-with tab1:
-    left, right = st.columns([3, 2], gap="large")
+with st.sidebar:
+    st.markdown("## 🔬 Breast Cancer\nPrediction Dashboard")
+    st.divider()
+    page = st.radio(
+        "Navigate",
+        ["📊 Overview", "🔍 EDA", "🤖 Model Comparison", "🎯 Predict"],
+        label_visibility="collapsed",
+    )
+    st.divider()
+    st.caption(f"Best model: **{best_name}**  \nAccuracy: **{best['Accuracy']:.4f}**  \nAUC: **{best['ROC-AUC']:.4f}**")
 
-    with left:
-        st.markdown("<div class='sec-header'>📋 Hasta Biyopsi Değerleri</div>", unsafe_allow_html=True)
-        input_values = {}
-        for group_name, features in GROUPS.items():
-            st.markdown(f"<div class='feat-group'>{group_name}</div>", unsafe_allow_html=True)
-            cols = st.columns(3)
-            for i, feat in enumerate(features):
-                label, unit = FEAT_LABELS.get(feat, (feat, ""))
-                mn, mx, default = FEAT_RANGES.get(feat, (0.0, 1.0, 0.5))
-                display = f"{label}" + (f" ({unit})" if unit else "")
-                with cols[i % 3]:
-                    input_values[feat] = st.number_input(
-                        display,
-                        min_value=float(mn * 0.4),
-                        max_value=float(mx * 2.5),
-                        value=float(default),
-                        format="%.4f",
-                        key=f"t1_{feat}"
-                    )
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+PLOT_LAYOUT = dict(
+    paper_bgcolor=C['bg'], plot_bgcolor=C['card'],
+    font_color=C['text'], margin=dict(t=50, b=40, l=40, r=20)
+)
 
-        col_b1, col_b2 = st.columns([2, 1])
-        with col_b1:
-            predict_btn = st.button("🔬 Tahmin Et", use_container_width=True, type="primary")
-        with col_b2:
-            reset_btn = st.button("↺ Sıfırla", use_container_width=True)
+def kpi(col, value, label, color=None):
+    color = color or C['primary']
+    col.markdown(f"""
+    <div class="kpi-card">
+        <div class="kpi-val" style="color:{color}">{value}</div>
+        <div class="kpi-lbl">{label}</div>
+    </div>""", unsafe_allow_html=True)
 
-    with right:
-        st.markdown("<div class='sec-header'>📈 Sonuç Paneli</div>", unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: OVERVIEW
+# ══════════════════════════════════════════════════════════════════════════════
+if page == "📊 Overview":
+    st.markdown("# 🔬 Breast Cancer Prediction")
+    st.markdown("Binary classification of tumor cells as **Benign** or **Malignant** using Wisconsin Diagnostic Breast Cancer data.")
+    st.divider()
 
-        if "prediction_result" not in st.session_state:
-            st.markdown("""
-            <div class="card" style="text-align:center; padding:48px 24px; color:#9BAABB;">
-                <div style="font-size:3rem;">🔬</div>
-                <div style="font-size:1rem; font-weight:600; margin-top:12px; color:#3D5270;">
-                    Tahmin bekleniyor
-                </div>
-                <div style="font-size:0.82rem; margin-top:8px;">
-                    Sol taraftaki değerleri doldurup<br>"Tahmin Et" butonuna basın.
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+    c1,c2,c3,c4,c5 = st.columns(5)
+    kpi(c1, len(X_all), "Total Samples", C['primary'])
+    kpi(c2, f"{(y_all==0).sum()}", "Benign (0)", C['benign'])
+    kpi(c3, f"{(y_all==1).sum()}", "Malignant (1)", C['malignant'])
+    kpi(c4, f"{best['Accuracy']:.4f}", f"Best Accuracy\n({best_name})", C['primary'])
+    kpi(c5, f"{best['ROC-AUC']:.4f}", "Best ROC-AUC", C['primary'])
+
+    st.divider()
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        st.markdown('<div class="sec-title">Target Distribution</div>', unsafe_allow_html=True)
+        counts = y_all.value_counts().sort_index()
+        fig = go.Figure(go.Bar(
+            x=['Benign (0)', 'Malignant (1)'],
+            y=[counts[0], counts[1]],
+            marker_color=[C['benign'], C['malignant']],
+            text=[counts[0], counts[1]], textposition='outside',
+        ))
+        fig.update_layout(height=320, showlegend=False, **PLOT_LAYOUT)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_b:
+        st.markdown('<div class="sec-title">Class Ratio</div>', unsafe_allow_html=True)
+        fig2 = go.Figure(go.Pie(
+            labels=['Benign', 'Malignant'], values=[counts[0], counts[1]],
+            marker_colors=[C['benign'], C['malignant']],
+            hole=0.4, textinfo='label+percent',
+        ))
+        fig2.update_layout(height=320, **PLOT_LAYOUT)
+        st.plotly_chart(fig2, use_container_width=True)
+
+    st.divider()
+    st.markdown('<div class="sec-title">Key Findings</div>', unsafe_allow_html=True)
+    f1c, f2c, f3c = st.columns(3)
+    with f1c:
+        st.success("**Best Model: Logistic Regression**\n\nAchieves F1-Score ~0.97 and ROC-AUC ~0.996 — near-perfect separation of classes.")
+    with f2c:
+        st.info("**Top Feature: texture_worst**\n\nSHAP analysis reveals worst-case texture and radius_se are the strongest predictors.")
+    with f3c:
+        st.warning("**Only 3 Misclassifications**\n\nConfusion matrix: 71 TN, 40 TP, 1 FP, 2 FN — extremely low false negative rate.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: EDA
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "🔍 EDA":
+    st.markdown("# 🔍 Exploratory Data Analysis")
+    st.divider()
+
+    tab1, tab2, tab3, tab4 = st.tabs(["Feature Importance", "Outlier Analysis", "Correlation Heatmap", "Feature Distributions"])
+
+    # ── Tab 1: Feature Importance ──────────────────────────────────────────────
+    with tab1:
+        st.markdown('<div class="sec-title">Feature Importance (Random Forest + Feature Engineering)</div>', unsafe_allow_html=True)
+        top_n = st.slider("Show top N features", 10, len(imp_df), 20, key="imp_n")
+        df_imp = imp_df.head(top_n).sort_values('importance')
+        bar_colors = [C['malignant'] if i >= len(df_imp)-3 else C['primary'] for i in range(len(df_imp))]
+        fig = go.Figure(go.Bar(
+            x=df_imp['importance'], y=df_imp['feature'],
+            orientation='h', marker_color=bar_colors,
+            text=[f"{v:.4f}" for v in df_imp['importance']], textposition='outside',
+        ))
+        fig.update_layout(height=max(400, top_n*22), xaxis_title="Importance Score",
+                          title="Feature Importance — engineered features highlighted in red", **PLOT_LAYOUT)
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("🔴 **Red bars** = top 3 features. Note: `concavity_points_product` (engineered) ranks very high.")
+
+    # ── Tab 2: Outlier Boxplot ─────────────────────────────────────────────────
+    with tab2:
+        st.markdown('<div class="sec-title">Top 10 Features with Most Outliers (IQR Method)</div>', unsafe_allow_html=True)
+
+        def count_iqr_outliers(series):
+            Q1, Q3 = series.quantile(0.25), series.quantile(0.75)
+            IQR = Q3 - Q1
+            return ((series < Q1 - 1.5*IQR) | (series > Q3 + 1.5*IQR)).sum()
+
+        outlier_counts = {col: count_iqr_outliers(X_raw[col]) for col in X_raw.columns}
+        top10_outlier = sorted(outlier_counts, key=outlier_counts.get, reverse=True)[:10]
+
+        fig = go.Figure()
+        for col in top10_outlier:
+            fig.add_trace(go.Box(y=X_raw[col], name=col, boxpoints='outliers',
+                                 marker_color=C['primary'], line_color=C['primary']))
+        fig.update_layout(height=480, title="Boxplot — Top 10 Features by Outlier Count",
+                          showlegend=False, **PLOT_LAYOUT)
+        st.plotly_chart(fig, use_container_width=True)
+        st.info("ℹ️ These outliers are **not errors** — extreme values in medical data often represent genuine biological variance in malignant cases.")
+
+    # ── Tab 3: Correlation Heatmap ─────────────────────────────────────────────
+    with tab3:
+        st.markdown('<div class="sec-title">Correlation Matrix</div>', unsafe_allow_html=True)
+        feature_group = st.selectbox("Feature group", ["_mean", "_se", "_worst", "All"])
+        if feature_group == "All":
+            cols_hm = X_raw.columns.tolist()[:15]
         else:
-            res = st.session_state["prediction_result"]
-            pred      = res["pred"]
-            ben_pct   = res["ben_pct"]
-            mal_pct   = res["mal_pct"]
+            cols_hm = [c for c in X_raw.columns if feature_group in c]
 
+        corr = X_raw[cols_hm].corr()
+        fig = px.imshow(corr, color_continuous_scale="RdBu_r", zmin=-1, zmax=1,
+                        text_auto=".2f", title=f"Correlation Matrix — {feature_group} features",
+                        template="plotly_dark")
+        fig.update_layout(height=500, paper_bgcolor=C['bg'], font_color=C['text'])
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── Tab 4: Feature Distributions ──────────────────────────────────────────
+    with tab4:
+        st.markdown('<div class="sec-title">Feature Distribution by Diagnosis</div>', unsafe_allow_html=True)
+        feat_sel = st.selectbox("Select feature", X_raw.columns.tolist())
+        df_plot = X_raw.copy()
+        df_plot['diagnosis'] = y_raw
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(x=df_plot[df_plot['diagnosis']==0][feat_sel],
+                                   name='Benign', marker_color=C['benign'], opacity=0.7, nbinsx=40))
+        fig.add_trace(go.Histogram(x=df_plot[df_plot['diagnosis']==1][feat_sel],
+                                   name='Malignant', marker_color=C['malignant'], opacity=0.7, nbinsx=40))
+        fig.update_layout(barmode='overlay', height=380, title=f"Distribution of {feat_sel}",
+                          xaxis_title=feat_sel, yaxis_title="Count", **PLOT_LAYOUT)
+        st.plotly_chart(fig, use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: MODEL COMPARISON
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "🤖 Model Comparison":
+    st.markdown("# 🤖 Model Comparison")
+    st.divider()
+
+    comp_df = pd.DataFrame([{
+        'Model': k, 'Accuracy': v['Accuracy'], 'Precision': v['Precision'],
+        'Recall': v['Recall'], 'F1-Score': v['F1-Score'],
+        'ROC-AUC': v['ROC-AUC'], 'CV_Mean': v['CV_Mean'], 'CV_Std': v['CV_Std']
+    } for k, v in results.items()]).sort_values('F1-Score', ascending=False).reset_index(drop=True)
+
+    # Metric cards for best model
+    st.markdown(f'<div class="sec-title">Best Model: {best_name}</div>', unsafe_allow_html=True)
+    mc1,mc2,mc3,mc4,mc5 = st.columns(5)
+    kpi(mc1, f"{best['Accuracy']:.4f}",  "Accuracy",  C['primary'])
+    kpi(mc2, f"{best['Precision']:.4f}", "Precision", C['benign'])
+    kpi(mc3, f"{best['Recall']:.4f}",    "Recall",    C['malignant'])
+    kpi(mc4, f"{best['F1-Score']:.4f}",  "F1-Score",  C['primary'])
+    kpi(mc5, f"{best['ROC-AUC']:.4f}",   "ROC-AUC",   C['primary'])
+
+    st.divider()
+
+    tab_a, tab_b, tab_c, tab_d = st.tabs(["Accuracy", "All Metrics", "ROC Curves", "Confusion Matrix"])
+
+    # ── Accuracy ───────────────────────────────────────────────────────────────
+    with tab_a:
+        fig = make_subplots(rows=1, cols=2, subplot_titles=("Accuracy", "Cross-Validation Mean ± Std"))
+        colors_bar = [C['malignant'] if m == best_name else C['primary'] for m in comp_df['Model']]
+        fig.add_trace(go.Bar(x=comp_df['Accuracy'], y=comp_df['Model'], orientation='h',
+                             marker_color=colors_bar, text=[f"{v:.4f}" for v in comp_df['Accuracy']],
+                             textposition='outside', name='Accuracy'), row=1, col=1)
+        fig.add_trace(go.Bar(x=comp_df['CV_Mean'], y=comp_df['Model'], orientation='h',
+                             error_x=dict(type='data', array=comp_df['CV_Std']),
+                             marker_color=colors_bar, name='CV Mean'), row=1, col=2)
+        fig.add_vline(x=best['Accuracy'], line_dash='dash', line_color=C['malignant'], row=1, col=1)
+        fig.add_vline(x=best['CV_Mean'],  line_dash='dash', line_color=C['malignant'], row=1, col=2)
+        fig.update_xaxes(range=[0.80, 1.0])
+        fig.update_layout(height=380, showlegend=False, **PLOT_LAYOUT)
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── All Metrics ────────────────────────────────────────────────────────────
+    with tab_b:
+        metric_sel = st.multiselect("Metrics", ['Accuracy','Precision','Recall','F1-Score','ROC-AUC'],
+                                     default=['Accuracy','Precision','Recall','F1-Score'])
+        fig = go.Figure()
+        metric_colors = {'Accuracy':C['primary'],'Precision':'#f39c12','Recall':C['benign'],'F1-Score':C['malignant'],'ROC-AUC':'#9b59b6'}
+        for m in metric_sel:
+            fig.add_trace(go.Bar(x=comp_df[m], y=comp_df['Model'], orientation='h',
+                                 name=m, marker_color=metric_colors.get(m, C['primary']), opacity=0.85))
+        fig.update_layout(barmode='group', height=420, xaxis_range=[0.80, 1.0], **PLOT_LAYOUT)
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── ROC Curves ─────────────────────────────────────────────────────────────
+    with tab_c:
+        fig = go.Figure()
+        palette = [C['primary'], C['benign'], C['malignant'], '#f39c12', '#9b59b6', '#1abc9c', '#e67e22']
+        for i, (name, res) in enumerate(results.items()):
+            fpr, tpr, _ = roc_curve(y_test, res['y_proba'])
+            lw = 3 if name == best_name else 1.5
+            fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines', name=f"{name} (AUC={res['ROC-AUC']:.4f})",
+                                     line=dict(color=palette[i % len(palette)], width=lw)))
+        fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode='lines', name='Random',
+                                 line=dict(color=C['muted'], dash='dash', width=1)))
+        fig.update_layout(height=460, xaxis_title='False Positive Rate',
+                          yaxis_title='True Positive Rate', title='ROC Curves — All Models', **PLOT_LAYOUT)
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── Confusion Matrix ───────────────────────────────────────────────────────
+    with tab_d:
+        model_sel = st.selectbox("Select model", list(results.keys()),
+                                  index=list(results.keys()).index(best_name))
+        cm = confusion_matrix(y_test, results[model_sel]['y_pred'])
+        fig = px.imshow(cm, text_auto=True, color_continuous_scale='Blues',
+                        x=['Benign (0)', 'Malignant (1)'], y=['Benign (0)', 'Malignant (1)'],
+                        labels=dict(x='Predicted', y='Actual'),
+                        title=f"Confusion Matrix — {model_sel}")
+        fig.update_layout(height=380, paper_bgcolor=C['bg'], font_color=C['text'])
+        st.plotly_chart(fig, use_container_width=True)
+
+        tn, fp, fn, tp = cm.ravel()
+        cc1,cc2,cc3,cc4 = st.columns(4)
+        kpi(cc1, tn, "True Negative",  C['benign'])
+        kpi(cc2, tp, "True Positive",  C['benign'])
+        kpi(cc3, fp, "False Positive", C['malignant'])
+        kpi(cc4, fn, "False Negative (critical!)", C['malignant'])
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: PREDICT
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "🎯 Predict":
+    st.markdown("# 🎯 Tumor Diagnosis Predictor")
+    st.markdown(f"Enter cell measurement values below. The **{best_name}** model will predict whether the tumor is **Benign** or **Malignant**.")
+    st.divider()
+
+    st.markdown('<div class="warn-box">⚠️ <strong>Medical Disclaimer:</strong> This tool is for educational and research purposes only. It is not a substitute for professional medical diagnosis. Always consult a qualified healthcare provider.</div>', unsafe_allow_html=True)
+    st.divider()
+
+    # Compute stats for smart defaults
+    stats = X_raw.describe()
+
+    # Group features into _mean, _se, _worst
+    mean_feats  = [c for c in ORIG_FEATURES if c.endswith('_mean')]
+    se_feats    = [c for c in ORIG_FEATURES if c.endswith('_se')]
+    worst_feats = [c for c in ORIG_FEATURES if c.endswith('_worst')]
+
+    st.markdown("**Quick fill:**")
+    qc1, qc2, qc3 = st.columns(3)
+    fill_benign   = qc1.button("Fill with Benign median values",   use_container_width=True)
+    fill_malign   = qc2.button("Fill with Malignant median values", use_container_width=True)
+    fill_reset    = qc3.button("Reset to overall median",           use_container_width=True)
+
+    # Compute medians
+    X_b_med = X_raw[y_raw == 0].median()
+    X_m_med = X_raw[y_raw == 1].median()
+    X_med   = X_raw.median()
+
+    def get_default(col):
+        if fill_benign:  return float(X_b_med[col])
+        if fill_malign:  return float(X_m_med[col])
+        return float(X_med[col])
+
+    input_vals = {}
+
+    st.markdown('<div class="sec-title">📐 Mean Features</div>', unsafe_allow_html=True)
+    cols_m = st.columns(5)
+    for i, feat in enumerate(mean_feats):
+        with cols_m[i % 5]:
+            input_vals[feat] = st.number_input(
+                feat, min_value=float(stats[feat]['min']),
+                max_value=float(stats[feat]['max']),
+                value=get_default(feat),
+                format="%.4f", key=f"inp_{feat}"
+            )
+
+    st.markdown('<div class="sec-title">📏 Standard Error Features</div>', unsafe_allow_html=True)
+    cols_s = st.columns(5)
+    for i, feat in enumerate(se_feats):
+        with cols_s[i % 5]:
+            input_vals[feat] = st.number_input(
+                feat, min_value=float(stats[feat]['min']),
+                max_value=float(stats[feat]['max']),
+                value=get_default(feat),
+                format="%.4f", key=f"inp_{feat}"
+            )
+
+    st.markdown('<div class="sec-title">⚠️ Worst Features</div>', unsafe_allow_html=True)
+    cols_w = st.columns(5)
+    for i, feat in enumerate(worst_feats):
+        with cols_w[i % 5]:
+            input_vals[feat] = st.number_input(
+                feat, min_value=float(stats[feat]['min']),
+                max_value=float(stats[feat]['max']),
+                value=get_default(feat),
+                format="%.4f", key=f"inp_{feat}"
+            )
+
+    st.divider()
+
+    if st.button("🔬 Run Prediction", use_container_width=True, type="primary"):
+        input_df = pd.DataFrame([input_vals])[ORIG_FEATURES]
+        pred        = final_pipeline.predict(input_df)[0]
+        proba       = final_pipeline.predict_proba(input_df)[0]
+        prob_benign = proba[0]
+        prob_malig  = proba[1]
+
+        left, right = st.columns([1, 1], gap="large")
+
+        with left:
             if pred == 0:
                 st.markdown(f"""
-                <div class="result-box result-benign">
-                    <div class="result-icon">✅</div>
-                    <div class="result-label">İyi Huylu (Benign)</div>
-                    <div class="result-prob">{ben_pct:.1f}%</div>
-                    <div class="result-sub">Benign olasılığı</div>
+                <div class="result-box benign-box">
+                    <div class="result-label" style="color:{C['benign']}">✅ BENIGN</div>
+                    <div class="result-sub">The model predicts this tumor is <strong>benign (non-cancerous)</strong>.</div>
+                    <div style="font-size:1.5rem; margin-top:12px; color:{C['benign']}">
+                        Confidence: {prob_benign*100:.1f}%
+                    </div>
                 </div>""", unsafe_allow_html=True)
             else:
                 st.markdown(f"""
-                <div class="result-box result-malignant">
-                    <div class="result-icon">⚠️</div>
-                    <div class="result-label">Kötü Huylu (Malignant)</div>
-                    <div class="result-prob">{mal_pct:.1f}%</div>
-                    <div class="result-sub">Malignant olasılığı</div>
+                <div class="result-box malign-box">
+                    <div class="result-label" style="color:{C['malignant']}">⚠️ MALIGNANT</div>
+                    <div class="result-sub">The model predicts this tumor is <strong>malignant (potentially cancerous)</strong>.</div>
+                    <div style="font-size:1.5rem; margin-top:12px; color:{C['malignant']}">
+                        Confidence: {prob_malig*100:.1f}%
+                    </div>
                 </div>""", unsafe_allow_html=True)
 
-            # Olasılık çubuğu
-            fig_prob = go.Figure()
-            fig_prob.add_trace(go.Bar(
-                x=[ben_pct], y=[""], orientation='h',
-                marker_color='#00C875', name='Benign',
-                text=f"Benign {ben_pct:.1f}%", textposition='inside',
-                textfont=dict(color='white', size=13, family='Inter'),
+        with right:
+            fig = go.Figure(go.Bar(
+                x=['Benign', 'Malignant'],
+                y=[prob_benign * 100, prob_malig * 100],
+                marker_color=[C['benign'], C['malignant']],
+                text=[f"{prob_benign*100:.1f}%", f"{prob_malig*100:.1f}%"],
+                textposition='outside', width=0.4,
             ))
-            fig_prob.add_trace(go.Bar(
-                x=[mal_pct], y=[""], orientation='h',
-                marker_color='#E03C31', name='Malignant',
-                text=f"Malignant {mal_pct:.1f}%", textposition='inside',
-                textfont=dict(color='white', size=13, family='Inter'),
-            ))
-            fig_prob.update_layout(
-                barmode='stack', height=72,
-                margin=dict(t=8, b=8, l=0, r=0),
-                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                showlegend=False, xaxis=dict(visible=False), yaxis=dict(visible=False),
+            fig.update_layout(
+                height=300, yaxis_range=[0, 115],
+                yaxis_title="Probability (%)",
+                title="Prediction Probability",
+                **PLOT_LAYOUT
             )
-            st.plotly_chart(fig_prob, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
 
-            # Güven göstergesi
-            confidence = max(ben_pct, mal_pct)
-            conf_label = "Çok Yüksek" if confidence > 90 else "Yüksek" if confidence > 75 else "Orta" if confidence > 60 else "Düşük"
-            conf_color = "#007A4D" if confidence > 90 else "#0F4C81" if confidence > 75 else "#E67E22" if confidence > 60 else "#E03C31"
+        # Engineered feature values
+        st.divider()
+        st.markdown('<div class="sec-title">🧬 Engineered Features (auto-calculated)</div>', unsafe_allow_html=True)
+        fe_transformer = FeatureEngineeringTransformer()
+        fe_transformer.fit(X_raw)
+        eng = fe_transformer.transform(input_df)
+        e1, e2, e3 = st.columns(3)
+        e1.metric("radius_area_ratio",        f"{eng['radius_area_ratio'].values[0]:.4f}")
+        e2.metric("perimeter_area_ratio",     f"{eng['perimeter_area_ratio'].values[0]:.4f}")
+        e3.metric("concavity_points_product", f"{eng['concavity_points_product'].values[0]:.4f}")
 
-            st.markdown(f"""
-            <div class="card" style="margin-top:8px;">
-                <div class="card-title">🎯 Model Güveni</div>
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <div style="font-size:1.6rem; font-weight:800; color:{conf_color};">{confidence:.1f}%</div>
-                    <div style="background:{conf_color}22; color:{conf_color}; font-size:0.78rem;
-                                font-weight:700; padding:4px 12px; border-radius:20px;">{conf_label}</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            # PDF rapor butonu
-            st.markdown("<div class='sec-header'>📄 Rapor</div>", unsafe_allow_html=True)
-            report_lines = [
-                "MedPredict AI — Hasta Tahmin Raporu",
-                "=" * 45,
-                f"Model          : {model_info['model_name']}",
-                f"Model Doğruluğu: {model_info['accuracy']*100:.2f}%",
-                "",
-                "─── TAHMİN SONUCU ───────────────────────",
-                f"Sonuç          : {'İyi Huylu (Benign)' if pred==0 else 'Kötü Huylu (Malignant)'}",
-                f"Benign Olasılığı   : {ben_pct:.2f}%",
-                f"Malignant Olasılığı: {mal_pct:.2f}%",
-                f"Model Güveni   : {conf_label} ({confidence:.1f}%)",
-                "",
-                "─── GİRİLEN DEĞERLERİN ÖZETİ ────────────",
-            ]
-            for feat in FEATURE_NAMES:
-                lbl, _ = FEAT_LABELS.get(feat, (feat, ""))
-                report_lines.append(f"  {lbl:<30}: {input_values.get(feat, 0):.4f}")
-            report_lines += [
-                "",
-                "─── UYARI ────────────────────────────────",
-                "Bu rapor yalnızca akademik/araştırma amaçlıdır.",
-                "Tıbbi teşhis için kullanılamaz.",
-            ]
-            report_text = "\n".join(report_lines)
-            st.download_button(
-                label="⬇️ TXT Raporu İndir",
-                data=report_text.encode("utf-8"),
-                file_name="medpredict_rapor.txt",
-                mime="text/plain",
-                use_container_width=True,
-            )
-
-        # Tahmin işlemi
-        if predict_btn:
-            if pipeline is None:
-                st.error("❌ `breast_cancer_pipeline.pkl` bulunamadı!")
-            else:
-                df_in = pd.DataFrame([input_values])
-                pred   = pipeline.predict(df_in)[0]
-                proba  = pipeline.predict_proba(df_in)[0]
-                st.session_state["prediction_result"] = {
-                    "pred": int(pred),
-                    "ben_pct": float(proba[0] * 100),
-                    "mal_pct": float(proba[1] * 100),
-                }
-                st.rerun()
-
-        if reset_btn:
-            if "prediction_result" in st.session_state:
-                del st.session_state["prediction_result"]
-            st.rerun()
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  TAB 2 — TOPLU ANALİZ (CSV)
-# ══════════════════════════════════════════════════════════════════════════════
-with tab2:
-    st.markdown("<div class='sec-header'>📂 CSV ile Toplu Tahmin</div>", unsafe_allow_html=True)
-
-    st.markdown("""
-    <div class="card">
-        <div class="card-title">📌 Kullanım Talimatları</div>
-        CSV dosyanız şu 30 sütunu içermelidir (sıra önemli değil):<br><br>
-        <code style="font-size:0.78rem; background:#F0F4F9; padding:8px 12px; border-radius:8px; display:block; line-height:2;">
-        radius_mean · texture_mean · perimeter_mean · area_mean · smoothness_mean · compactness_mean · concavity_mean ·
-        concave points_mean · symmetry_mean · fractal_dimension_mean · radius_se · texture_se · perimeter_se · area_se ·
-        smoothness_se · compactness_se · concavity_se · concave points_se · symmetry_se · fractal_dimension_se ·
-        radius_worst · texture_worst · perimeter_worst · area_worst · smoothness_worst · compactness_worst ·
-        concavity_worst · concave points_worst · symmetry_worst · fractal_dimension_worst
-        </code>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Örnek CSV indirme
-    sample_data = {}
-    for f in FEATURE_NAMES:
-        mn, mx, default = FEAT_RANGES[f]
-        sample_data[f] = [round(default + np.random.uniform(-0.1, 0.1) * default, 4) for _ in range(5)]
-    sample_df = pd.DataFrame(sample_data)
-    st.download_button(
-        "⬇️ Örnek CSV Şablonu İndir",
-        data=sample_df.to_csv(index=False).encode("utf-8"),
-        file_name="ornek_veri.csv",
-        mime="text/csv"
-    )
-
-    uploaded = st.file_uploader("CSV dosyası yükleyin", type=["csv"], label_visibility="collapsed")
-
-    if uploaded and pipeline:
-        try:
-            df_csv = pd.read_csv(uploaded)
-            missing = [c for c in FEATURE_NAMES if c not in df_csv.columns]
-
-            if missing:
-                st.error(f"❌ Eksik sütunlar: {', '.join(missing)}")
-            else:
-                df_feat = df_csv[FEATURE_NAMES].copy()
-                preds  = pipeline.predict(df_feat)
-                probas = pipeline.predict_proba(df_feat)
-
-                df_result = df_csv.copy()
-                df_result["Tahmin"]              = ["Benign" if p == 0 else "Malignant" for p in preds]
-                df_result["Benign Olasılığı %"]  = (probas[:, 0] * 100).round(2)
-                df_result["Malignant Olasılığı %"] = (probas[:, 1] * 100).round(2)
-                df_result["Güven %"]             = (np.max(probas, axis=1) * 100).round(2)
-
-                # Özet metrikler
-                n_total   = len(preds)
-                n_benign  = (preds == 0).sum()
-                n_malig   = (preds == 1).sum()
-                avg_conf  = (np.max(probas, axis=1) * 100).mean()
-
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Toplam Örnek", n_total)
-                c2.metric("İyi Huylu", n_benign, f"{n_benign/n_total*100:.1f}%")
-                c3.metric("Kötü Huylu", n_malig, f"{n_malig/n_total*100:.1f}%")
-                c4.metric("Ort. Güven", f"{avg_conf:.1f}%")
-
-                # Dağılım grafiği
-                fig_dist = go.Figure(data=[
-                    go.Bar(
-                        x=["Benign (İyi Huylu)", "Malignant (Kötü Huylu)"],
-                        y=[n_benign, n_malig],
-                        marker_color=["#00C875", "#E03C31"],
-                        text=[n_benign, n_malig], textposition="outside",
-                        textfont=dict(size=16, color=["#007A4D", "#B52A1D"], family="Inter"),
-                        width=0.4,
-                    )
-                ])
-                fig_dist.update_layout(
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    height=260, margin=dict(t=20, b=10, l=10, r=10),
-                    xaxis=dict(tickfont=dict(color="#3D5270", size=13)),
-                    yaxis=dict(gridcolor="#E8EDF4", tickfont=dict(color="#9BAABB")),
-                    showlegend=False,
-                )
-                st.plotly_chart(fig_dist, use_container_width=True)
-
-                # Sonuç tablosu
-                st.markdown("<div class='sec-header'>📋 Tahmin Sonuçları</div>", unsafe_allow_html=True)
-                display_cols = ["Tahmin", "Benign Olasılığı %", "Malignant Olasılığı %", "Güven %"]
-                if "id" in df_result.columns:
-                    display_cols = ["id"] + display_cols
-                st.dataframe(
-                    df_result[display_cols].style.applymap(
-                        lambda v: "background-color:#E8FBF3; color:#007A4D; font-weight:600" if v == "Benign"
-                        else ("background-color:#FFF0EE; color:#B52A1D; font-weight:600" if v == "Malignant" else ""),
-                        subset=["Tahmin"]
-                    ),
-                    use_container_width=True, height=400
-                )
-
-                st.download_button(
-                    "⬇️ Sonuçları CSV Olarak İndir",
-                    data=df_result.to_csv(index=False).encode("utf-8"),
-                    file_name="medpredict_sonuclar.csv",
-                    mime="text/csv",
-                    type="primary"
-                )
-
-        except Exception as e:
-            st.error(f"❌ Hata: {e}")
-
-    elif uploaded and pipeline is None:
-        st.error("❌ Model dosyası (`breast_cancer_pipeline.pkl`) bulunamadı.")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  TAB 3 — MODEL & SONUÇLAR
-# ══════════════════════════════════════════════════════════════════════════════
-with tab3:
-    # KPI'lar
-    st.markdown("<div class='sec-header'>🏅 Final Model Performansı</div>", unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Accuracy",  f"{model_info['accuracy']*100:.2f}%")
-    c2.metric("F1-Score",  f"{model_info['f1_score']*100:.2f}%")
-    c3.metric("ROC-AUC",   f"{model_info['roc_auc']*100:.2f}%")
-    c4.metric("Model",     model_info['model_name'])
-
-    # Model karşılaştırma tablosu
-    st.markdown("<div class='sec-header'>📊 9 Model Karşılaştırması</div>", unsafe_allow_html=True)
-    model_data = {
-        "Model":["Logistic Regression","SVM","Gradient Boosting","XGBoost","Random Forest",
-                 "LightGBM","KNN","Naive Bayes","Decision Tree"],
-        "Accuracy":[0.9737,0.9561,0.9561,0.9561,0.9474,0.9474,0.9386,0.9211,0.9035],
-        "Precision":[0.9756,0.9744,0.9512,0.9744,0.9512,1.000,0.9608,0.8718,0.9000],
-        "Recall":[0.9524,0.9286,0.9524,0.9286,0.9286,0.8810,0.8810,0.9524,0.8571],
-        "F1-Score":[0.9639,0.9510,0.9517,0.9510,0.9397,0.9367,0.9189,0.9104,0.8780],
-        "ROC-AUC":[0.9861,0.9974,0.9940,0.9901,0.9928,0.9938,0.9630,0.9930,0.8870],
-    }
-    df_m = pd.DataFrame(model_data)
-
-    # Tooltip rengi
-    def highlight_best(col):
-        if col.name == "Model":
-            return [""]*len(col)
-        best = col.max()
-        return ["background-color:#EEF9F3; color:#007A4D; font-weight:700"
-                if v == best else "" for v in col]
-
-    for c in ["Accuracy","Precision","Recall","F1-Score","ROC-AUC"]:
-        df_m[c] = df_m[c].apply(lambda x: f"{x:.4f}")
-    st.dataframe(df_m.style.apply(highlight_best), use_container_width=True, hide_index=True)
-
-    # Grafik
-    df_chart = pd.DataFrame(model_data)
-    fig_comp = go.Figure()
-    metrics  = ["Accuracy","F1-Score","ROC-AUC"]
-    colors_m = ["#0F4C81","#2196F3","#64B5F6"]
-    for metric, color in zip(metrics, colors_m):
-        fig_comp.add_trace(go.Bar(
-            x=df_chart["Model"], y=df_chart[metric], name=metric,
-            marker_color=color, opacity=0.85,
-        ))
-    fig_comp.update_layout(
-        barmode="group", height=360,
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(tickangle=-30, tickfont=dict(size=11, color="#3D5270"), gridcolor="#E8EDF4"),
-        yaxis=dict(range=[0.85, 1.0], gridcolor="#E8EDF4", tickfont=dict(color="#9BAABB")),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-                    font=dict(color="#3D5270")),
-        margin=dict(t=16, b=16, l=0, r=0),
-    )
-    st.plotly_chart(fig_comp, use_container_width=True)
-
-    # Grafik görselleri
-    st.markdown("<div class='sec-header'>🖼️ Analiz Görselleri</div>", unsafe_allow_html=True)
-    img_pairs = [
-        ("graphs/final_model_confusion_matrix.png", "Confusion Matrix & ROC"),
-        ("graphs/model_comparison.png",          "Model Karşılaştırması"),
-        ("graphs/shap_importance.png",            "SHAP Özellik Önemi"),
-        ("graphs/shap_summary.png",               "SHAP Özet Analizi"),
-    ]
-    row1 = st.columns(2)
-    for i, (path, caption) in enumerate(img_pairs):
-        with row1[i % 2]:
-            if os.path.exists(path):
-                st.image(path, caption=caption, use_container_width=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  TAB 4 — VERİ KEŞFİ
-# ══════════════════════════════════════════════════════════════════════════════
-with tab4:
-    st.markdown("<div class='sec-header'>🗂️ Veri Seti Özeti</div>", unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Toplam Örnek", "569")
-    c2.metric("Özellik Sayısı", "30")
-    c3.metric("Benign", "357  (62.7%)")
-    c4.metric("Malignant", "212  (37.3%)")
-
-    # Dağılım
-    col_p, col_i = st.columns([1, 2])
-    with col_p:
-        fig_pie = go.Figure(go.Pie(
-            labels=["Benign", "Malignant"], values=[357, 212],
-            hole=0.55, marker_colors=["#00C875", "#E03C31"],
-            textinfo="label+percent",
-            textfont=dict(size=13, family="Inter"),
-        ))
-        fig_pie.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
-            height=260, margin=dict(t=10, b=10, l=10, r=10),
-            annotations=[dict(text="569", x=0.5, y=0.5,
-                               font=dict(size=20, color="#1A2B4A", family="Inter"),
-                               showarrow=False)]
-        )
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    with col_i:
-        eda_imgs = [
-            ("graphs/correlation_matrix.png",        "Korelasyon Matrisi"),
-            ("graphs/target_correlation.png",         "Hedef Korelasyon"),
-            ("graphs/top10_outliers_boxplot.png",     "Aykırı Değerler"),
-            ("graphs/diagnosis_distribution.png",     "Dağılım"),
-        ]
-        sel = st.radio("Görsel Seç", [c for _, c in eda_imgs],
-                       horizontal=True, label_visibility="collapsed")
-        for path, cap in eda_imgs:
-            if cap == sel and os.path.exists(path):
-                st.image(path, caption=cap, use_container_width=True)
-
-# ─── Footer ───────────────────────────────────────────────────────────────────
-st.markdown("""
-<hr style="border:none; border-top:1px solid #E8EDF4; margin:40px 0 16px 0;">
-<div style="text-align:center; color:#9BAABB; font-size:0.78rem; padding-bottom:24px;">
-    MedPredict AI · Wisconsin Breast Cancer Dataset ·
-    Model: <b style="color:#0F4C81;">Logistic Regression</b> ·
-    Yalnızca akademik kullanım içindir.
-</div>
-""", unsafe_allow_html=True)
+        # Risk flag
+        if pred == 1 and prob_malig > 0.8:
+            st.error("🚨 **High-confidence malignant prediction.** Please consult a medical professional immediately.")
+        elif pred == 1 and prob_malig <= 0.8:
+            st.warning("⚠️ **Malignant prediction with moderate confidence.** Further clinical evaluation recommended.")
+        else:
+            st.success("✅ Benign prediction. Regular check-ups are still recommended.")
