@@ -1,11 +1,3 @@
-# ══════════════════════════════════════════════════════════════════════════════
-# Breast Cancer Prediction — Streamlit Dashboard
-# Proje mimarisi:
-#   data.csv                      → ham veri (Kaggle WBCD)
-#   breast_cancer_pipeline.pkl    → eğitilmiş pipeline (FE + Scaler + LogReg)
-#   app.py                        → bu dosya
-# ══════════════════════════════════════════════════════════════════════════════
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -572,25 +564,42 @@ elif page == "🎯 Predict":
     )
     st.divider()
 
-    # Stats for input bounds — sadece ORIG_FEATURES üzerinden
+    # Stats for input bounds
     stats   = X_raw[ORIG_FEATURES].describe()
     X_b_med = X_raw[y_raw == 0][ORIG_FEATURES].median()
     X_m_med = X_raw[y_raw == 1][ORIG_FEATURES].median()
     X_med   = X_raw[ORIG_FEATURES].median()
 
-    # Quick fill butonları
+    # session_state ile fill modunu kalici tut
+    if "fill_mode" not in st.session_state:
+        st.session_state.fill_mode = "overall"
+
+    # Quick fill butonlari
     st.markdown("**Quick fill:**")
     qc1, qc2, qc3 = st.columns(3)
-    fill_b = qc1.button("🟢 Fill Benign median",   use_container_width=True)
-    fill_m = qc2.button("🔴 Fill Malignant median", use_container_width=True)
-    fill_r = qc3.button("⚪ Reset to overall median", use_container_width=True)
+    if qc1.button("Fill Benign median",      use_container_width=True):
+        st.session_state.fill_mode = "benign"
+        for f in ORIG_FEATURES:
+            st.session_state.pop(f"inp_{f}", None)
+        st.rerun()
+    if qc2.button("Fill Malignant median",   use_container_width=True):
+        st.session_state.fill_mode = "malignant"
+        for f in ORIG_FEATURES:
+            st.session_state.pop(f"inp_{f}", None)
+        st.rerun()
+    if qc3.button("Reset to overall median", use_container_width=True):
+        st.session_state.fill_mode = "overall"
+        for f in ORIG_FEATURES:
+            st.session_state.pop(f"inp_{f}", None)
+        st.rerun()
 
     def default(col):
-        if fill_b: return float(X_b_med[col])
-        if fill_m: return float(X_m_med[col])
+        mode = st.session_state.fill_mode
+        if mode == "benign":    return float(X_b_med[col])
+        if mode == "malignant": return float(X_m_med[col])
         return float(X_med[col])
 
-    # Feature grupları
+        # Feature grupları
     mean_feats  = [c for c in ORIG_FEATURES if c.endswith("_mean")]
     se_feats    = [c for c in ORIG_FEATURES if c.endswith("_se")]
     worst_feats = [c for c in ORIG_FEATURES if c.endswith("_worst")]
