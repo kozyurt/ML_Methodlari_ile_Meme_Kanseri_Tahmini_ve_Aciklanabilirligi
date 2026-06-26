@@ -578,43 +578,38 @@ elif page == "🎯 Predict":
     X_m_med = X_raw[y_raw == 1][ORIG_FEATURES].median()
     X_med   = X_raw[ORIG_FEATURES].median()
 
-    # session_state ile fill modunu kalici tut
+    # session_state: fill_mode kalici, inputlar anlik guncellenir
     if "fill_mode" not in st.session_state:
         st.session_state.fill_mode = "overall"
+
+    # Medyan sozlukleri
+    medians = {
+        "benign":    X_b_med,
+        "malignant": X_m_med,
+        "overall":   X_med,
+    }
+
+    def apply_fill(mode):
+        st.session_state.fill_mode = mode
+        for f in ORIG_FEATURES:
+            st.session_state[f"inp_{f}"] = float(medians[mode][f])
 
     # Quick fill butonlari
     st.markdown("**Quick fill:**")
     qc1, qc2, qc3 = st.columns(3)
     if qc1.button("Fill Benign median",      use_container_width=True):
-        st.session_state.fill_mode = "benign"
-        for f in ORIG_FEATURES:
-            st.session_state.pop(f"inp_{f}", None)
-        st.rerun()
+        apply_fill("benign")
     if qc2.button("Fill Malignant median",   use_container_width=True):
-        st.session_state.fill_mode = "malignant"
-        for f in ORIG_FEATURES:
-            st.session_state.pop(f"inp_{f}", None)
-        st.rerun()
+        apply_fill("malignant")
     if qc3.button("Reset to overall median", use_container_width=True):
-        st.session_state.fill_mode = "overall"
-        for f in ORIG_FEATURES:
-            st.session_state.pop(f"inp_{f}", None)
-        st.rerun()
+        apply_fill("overall")
 
-    def default(col):
-        mode = st.session_state.fill_mode
-        if mode == "benign":    return float(X_b_med[col])
-        if mode == "malignant": return float(X_m_med[col])
-        return float(X_med[col])
+    # Session_state'te yoksa aktif moda gore default deger ata
+    for f in ORIG_FEATURES:
+        if f"inp_{f}" not in st.session_state:
+            st.session_state[f"inp_{f}"] = float(medians[st.session_state.fill_mode][f])
 
-        # Feature grupları
-    mean_feats  = [c for c in ORIG_FEATURES if c.endswith("_mean")]
-    se_feats    = [c for c in ORIG_FEATURES if c.endswith("_se")]
-    worst_feats = [c for c in ORIG_FEATURES if c.endswith("_worst")]
-    other_feats = [c for c in ORIG_FEATURES
-                   if c not in mean_feats + se_feats + worst_feats]
-
-    input_vals = {}
+        input_vals = {}
     groups = [
         ("📐 Mean Features",           mean_feats),
         ("📏 Standard Error Features", se_feats),
@@ -632,7 +627,6 @@ elif page == "🎯 Predict":
                     feat,
                     min_value=float(stats[feat]["min"]),
                     max_value=float(stats[feat]["max"]),
-                    value=default(feat),
                     format="%.4f",
                     key=f"inp_{feat}",
                 )
