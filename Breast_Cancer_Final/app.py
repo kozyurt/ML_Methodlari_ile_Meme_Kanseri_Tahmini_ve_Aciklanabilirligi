@@ -1,3 +1,11 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Breast Cancer Prediction — Streamlit Dashboard
+# Proje mimarisi:
+#   data.csv                      → ham veri (Kaggle WBCD)
+#   breast_cancer_pipeline.pkl    → eğitilmiş pipeline (FE + Scaler + LogReg)
+#   app.py                        → bu dosya
+# ══════════════════════════════════════════════════════════════════════════════
+
 import streamlit as st
 import pandas as pd
 import numpy as np
