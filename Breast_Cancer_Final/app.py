@@ -609,7 +609,14 @@ elif page == "🎯 Predict":
         if f"inp_{f}" not in st.session_state:
             st.session_state[f"inp_{f}"] = float(medians[st.session_state.fill_mode][f])
 
-        input_vals = {}
+    # Feature gruplari
+    mean_feats  = [c for c in ORIG_FEATURES if c.endswith("_mean")]
+    se_feats    = [c for c in ORIG_FEATURES if c.endswith("_se")]
+    worst_feats = [c for c in ORIG_FEATURES if c.endswith("_worst")]
+    other_feats = [c for c in ORIG_FEATURES
+                   if c not in mean_feats + se_feats + worst_feats]
+
+    input_vals = {}
     groups = [
         ("📐 Mean Features",           mean_feats),
         ("📏 Standard Error Features", se_feats),
