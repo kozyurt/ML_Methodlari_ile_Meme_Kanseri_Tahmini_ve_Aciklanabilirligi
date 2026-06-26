@@ -11,6 +11,10 @@ import pandas as pd
 import numpy as np
 import pickle
 import warnings
+from pathlib import Path
+
+# app.py nerede çalışırsa çalışsın dosyaları hep kendi klasöründe arar
+BASE_DIR = Path(__file__).parent
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.model_selection import train_test_split, cross_val_score
@@ -133,7 +137,7 @@ class FeatureEngineeringTransformer(BaseEstimator, TransformerMixin):
 # ──────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner="Loading dataset…")
 def load_data():
-    df = pd.read_csv("data.csv")
+    df = pd.read_csv(BASE_DIR / "data.csv")
     df = df.drop(columns=[c for c in ["id", "Unnamed: 32"] if c in df.columns])
     df["diagnosis"] = LabelEncoder().fit_transform(df["diagnosis"])  # B=0, M=1
     X = df.drop("diagnosis", axis=1)
@@ -145,7 +149,7 @@ def load_data():
 # ──────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Loading saved pipeline…")
 def load_pipeline():
-    with open("breast_cancer_pipeline.pkl", "rb") as f:
+    with open(BASE_DIR / "breast_cancer_pipeline.pkl", "rb") as f:
         return pickle.load(f)
 
 # ──────────────────────────────────────────────────────────────────────────────
